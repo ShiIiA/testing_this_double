@@ -225,10 +225,12 @@ def explore_data_page():
 
         if disease_header and gender_header:
             selected_disease = st.selectbox("Select Disease Category:", options=sorted(df[disease_header].dropna().unique()))
-            filtered_df = df[df[disease_header] == selected_disease]
+            filtered_df = df[df[disease_header] == selected_disease].copy()
             if filtered_df.empty:
                 st.info("No records found for the selected disease category.")
             else:
+                # Normalize gender labels before counting
+                filtered_df[gender_header] = filtered_df[gender_header].apply(unify_gender_label)
                 # Pre-aggregate gender counts for the pie chart.
                 gender_counts = filtered_df[gender_header].value_counts().reset_index()
                 gender_counts.columns = [gender_header, "Count"]
@@ -242,7 +244,7 @@ def explore_data_page():
                     hover_data=["Count"]
                 )
                 # Update trace to show percentage.
-                pie_chart.update_traces(texttemplate='%{percent:.1%}', textposition='inside')
+                pie_chart.update_traces(texttemplate='%{percent:.3%}', textposition='inside')
                 st.plotly_chart(pie_chart, use_container_width=True)
 
             # Limit the sample size for the pivot table to avoid huge DataFrames.
@@ -580,7 +582,7 @@ def posters_page():
         with cols[i]:
             poster_path = os.path.join("images", poster)
             if os.path.exists(poster_path):
-                st.image(poster_path, caption=f"Poster {poster.split('.')[0]}")
+                st.image(poster_path)
             else:
                 st.error(f"Image not found: {poster_path}")
 
