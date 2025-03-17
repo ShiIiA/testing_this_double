@@ -12,8 +12,8 @@ import logging
 import streamlit as st
 import pandas as pd
 import numpy as np
+import altair as alt
 import matplotlib.pyplot as plt
-import plotly.express as px
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -207,63 +207,50 @@ def upload_data_page():
         st.info("Please upload a dataset to continue.")
 
 def explore_data_page():
-    """Display an improved interactive data exploration page."""
+    """Display an interactive data exploration page using Altair."""
     st.title("📊 Explore Data & Prepare")
     df = st.session_state.df
     if df is not None:
-        st.subheader("Select Columns")
-        gender_col = st.selectbox("🛑 Select Gender Column:", df.columns,
-                                  help="Column indicating gender.")
-        disease_col = st.selectbox("🩺 Select Disease Column:", df.columns,
-                                   help="Column showing disease status.")
-        image_id_col = st.selectbox("🖼️ Select Image ID Column:", df.columns,
-                                    help="Unique image identifier.")
-        # Convert Image ID column to string to avoid type conflicts
-        df[image_id_col] = df[image_id_col].astype(str)
-        df[gender_col] = df[gender_col].apply(unify_gender_label)
-        df[disease_col] = df[disease_col].apply(unify_disease_label)
-        st.session_state.gender_col = gender_col
-        st.session_state.disease_col = disease_col
-        st.session_state.image_id_col = image_id_col
+        st.subheader("Select Columns for Visualization")
+        selected_cols = st.multiselect("Choose one or more columns to visualize:", df.columns.tolist())
+        # Ensure necessary columns for EDA are converted correctly
+        if selected_cols:
+            for col in selected_cols:
+                st.markdown(f"### Visualization for **{col}**")
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    # Create a histogram using Altair with binning.
+                    chart = alt.Chart(df).mark_bar().encode(
+                        alt.X(f"{col}:Q", bin=alt.Bin(maxbins=20), title=col),
+                        alt.Y("count()", title="Count"),
+                        tooltip=[col, "count()"]
+                    ).properties(
+                        width=600,
+                        height=400,
+                        title=f"Histogram of {col}"
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+                else:
+                    # For categorical data, create a bar chart of counts.
+                    counts = df[col].value_counts().reset_index()
+                    counts.columns = [col, "Count"]
+                    chart = alt.Chart(counts).mark_bar().encode(
+                        alt.X(f"{col}:N", sort='-y', title=col),
+                        alt.Y("Count:Q", title="Count"),
+                        tooltip=[col, "Count"]
+                    ).properties(
+                        width=600,
+                        height=400,
+                        title=f"Bar Chart of {col}"
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("Please select at least one column for visualization.")
 
-        st.subheader("Data Summary")
-        st.write(df.describe(include="all"))
-
-        st.markdown("### Missing Values")
+        # Show a missing values summary
+        st.markdown("### Missing Values Summary")
         missing = df.isnull().sum().reset_index()
         missing.columns = ['Column', 'Missing Values']
         st.dataframe(missing)
-
-        st.markdown("#### Column Distributions")
-        # Separate numeric and categorical columns
-        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        categorical_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
-
-        st.markdown("##### Numeric Columns")
-        for col in numeric_cols:
-            try:
-                # If the column is boolean, convert it to integer
-                if df[col].dtype == bool:
-                    data = df[col].astype(int)
-                else:
-                    # Coerce errors so that non-numeric values become NaN
-                    data = pd.to_numeric(df[col], errors='coerce')
-                fig = px.histogram(data.dropna(), nbins=20, title=f"Distribution of {col}")
-                st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                logging.error(f"Error plotting numeric column {col}", exc_info=True)
-                st.error(f"Error plotting numeric column {col}: {e}")
-
-        st.markdown("##### Categorical Columns")
-        for col in categorical_cols:
-            try:
-                counts = df[col].value_counts().reset_index()
-                counts.columns = [col, "Count"]
-                fig = px.bar(counts, x=col, y="Count", title=f"Counts of {col}")
-                st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                logging.error(f"Error plotting categorical column {col}", exc_info=True)
-                st.error(f"Error plotting categorical column {col}: {e}")
     else:
         st.info("No data uploaded. Please use the Upload Data page.")
 
