@@ -208,7 +208,7 @@ def upload_data_page():
         st.info("Please upload a dataset to continue.")
 
 def explore_data_page():
-    """Display an interactive data exploration page using Altair and Plotly for disease visualization."""
+    """Display an interactive data exploration page using Altair for selected columns and Plotly for disease visualization."""
     st.title("📊 Explore Data & Prepare")
     df = st.session_state.df
     if df is not None:
@@ -251,15 +251,23 @@ def explore_data_page():
         missing.columns = ['Column', 'Missing Values']
         st.dataframe(missing)
 
-        # ----------------- New Disease Visualization Section -----------------
-        if "Disease" in df.columns and "Gender" in df.columns:
-            st.markdown("### Gender Distribution per Disease")
-            selected_disease = st.selectbox("Select Disease:", options=sorted(df["Disease"].unique()))
-            disease_df = df[df["Disease"] == selected_disease]
-            pie_chart = px.pie(disease_df, names="Gender", title=f"Gender Distribution for {selected_disease}")
+        # ----------------- Disease and Gender Visualization -----------------
+        st.markdown("### Disease and Gender Visualization")
+        # Let the user select which columns represent Disease and Gender
+        disease_header = st.selectbox("Select Disease Column for Visualization:", df.columns.tolist())
+        gender_header = st.selectbox("Select Gender Column for Visualization:", df.columns.tolist())
+        # Only proceed if both are selected (they will be non-empty since options come from df.columns)
+        if disease_header and gender_header:
+            # Allow the user to select a disease category from the chosen disease column
+            selected_disease = st.selectbox("Select Disease Category:", options=sorted(df[disease_header].dropna().unique()))
+            # Filter the dataframe for the selected disease
+            disease_df = df[df[disease_header] == selected_disease]
+            # Create a pie chart for gender distribution using Plotly Express
+            pie_chart = px.pie(disease_df, names=gender_header,
+                               title=f"Gender Distribution for {selected_disease}")
             st.plotly_chart(pie_chart, use_container_width=True)
         else:
-            st.info("For disease visualization, ensure that the dataset contains 'Disease' and 'Gender' columns.")
+            st.info("Please select the appropriate Disease and Gender columns for visualization.")
     else:
         st.info("No data uploaded. Please use the Upload Data page.")
 
