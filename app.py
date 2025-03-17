@@ -204,8 +204,14 @@ def explore_data_page():
         st.markdown("#### Column Distributions")
         for col in df.columns:
             fig, ax = plt.subplots()
+            # If the column is numeric, handle booleans specially.
             if pd.api.types.is_numeric_dtype(df[col]):
-                ax.hist(df[col].dropna(), bins=20, color="#4facfe", edgecolor="black")
+                if df[col].dtype == bool:
+                    data = df[col].astype(int)
+                else:
+                    # Coerce errors so that non-numeric values (e.g. "Unknown") become NaN.
+                    data = pd.to_numeric(df[col], errors='coerce')
+                ax.hist(data.dropna(), bins=20, color="#4facfe", edgecolor="black")
                 ax.set_title(f"Distribution of {col}")
             else:
                 counts = df[col].value_counts()
