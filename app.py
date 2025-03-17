@@ -226,23 +226,25 @@ def explore_data_page():
         if disease_header and gender_header:
             selected_disease = st.selectbox("Select Disease Category:", options=sorted(df[disease_header].dropna().unique()))
             filtered_df = df[df[disease_header] == selected_disease]
-            # Pre-aggregate gender counts for the pie chart.
-            gender_counts = filtered_df[gender_header].value_counts().reset_index()
-            gender_counts.columns = [gender_header, "Count"]
-            pie_chart = px.pie(
-                gender_counts,
-                names=gender_header,
-                values="Count",
-                title=f"Gender Distribution for {selected_disease}",
-                color=gender_header,
-                color_discrete_map={"F": "pink", "M": "blue"},
-                hover_data=["Count"]
-            )
-            # Show raw count inside slices.
-            pie_chart.update_traces(texttemplate='%{value}', textposition='inside')
-            st.plotly_chart(pie_chart, use_container_width=True)
+            if filtered_df.empty:
+                st.info("No records found for the selected disease category.")
+            else:
+                # Pre-aggregate gender counts for the pie chart.
+                gender_counts = filtered_df[gender_header].value_counts().reset_index()
+                gender_counts.columns = [gender_header, "Count"]
+                pie_chart = px.pie(
+                    gender_counts,
+                    names=gender_header,
+                    values="Count",
+                    title=f"Gender Distribution for {selected_disease}",
+                    color=gender_header,
+                    color_discrete_map={"F": "pink", "M": "blue"},
+                    hover_data=["Count"]
+                )
+                pie_chart.update_traces(texttemplate='%{value}', textposition='inside')
+                st.plotly_chart(pie_chart, use_container_width=True)
 
-            # Create pivot table using pivot_table (aggfunc 'size')
+            # Create pivot table using pivot_table with aggfunc 'size'
             pivot_df = pd.pivot_table(df, index=disease_header, columns=gender_header, aggfunc='size', fill_value=0)
             for col in ["F", "M"]:
                 if col not in pivot_df.columns:
@@ -445,8 +447,7 @@ def explainable_analysis_page():
     if disease_col is None or image_id_col is None:
         st.info("Required column selections are missing.")
         return
-    merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left",
-                      left_on="Image_ID", right_on=image_id_col)
+    merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left", left_on="Image_ID", right_on=image_id_col)
     merged = merged.rename(columns={disease_col: "True_Label"})
     merged["Correct"] = merged.apply(lambda row: (row["Prediction"] == 1 and row["True_Label"] != "No Disease") or
                                                (row["Prediction"] == 0 and row["True_Label"] == "No Disease"), axis=1)
