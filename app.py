@@ -212,12 +212,11 @@ def explore_data_page():
     Display an interactive data exploration page.
       - Users select columns for visualization using Altair.
       - Users choose which columns represent Disease, Gender, and (optionally) Age.
-      - A pie chart shows the gender repartition (with pink for females, blue for males)
-        for a selected disease category.
+      - A pie chart shows the gender repartition (Females in pink, Males in blue)
+        for a selected disease category with count tooltip.
       - A pivot table is created showing, for each disease, the counts per gender and,
         if an Age column is selected, the average, minimum, and maximum age.
-      - The table styles the "F" column in pink and the "M" column in blue,
-        and highlights rows in yellow when only one gender is present.
+      - In the table, cells for females are pink and for males are blue. Cells with a value of 0 are highlighted in yellow.
     """
     st.title("📊 Explore Data & Prepare")
     df = st.session_state.df
@@ -268,41 +267,51 @@ def explore_data_page():
             df[age_header] = pd.to_numeric(df[age_header], errors='coerce')
 
         if disease_header and gender_header:
-            # Pie Chart for a selected disease category with custom colors
+            # Build a pre-aggregated DataFrame for the pie chart.
+            disease_counts = df[disease_header].value_counts().reset_index()
+            disease_counts.columns = [disease_header, "Total"]
             selected_disease = st.selectbox("Select Disease Category:", options=sorted(df[disease_header].dropna().unique()))
-            disease_df = df[df[disease_header] == selected_disease]
-            pie_chart = px.pie(disease_df, names=gender_header,
-                               title=f"Gender Distribution for {selected_disease}",
-                               color=gender_header,
-                               color_discrete_map={"F": "pink", "M": "blue"})
+            # Filter data for the selected disease
+            filtered_df = df[df[disease_header] == selected_disease]
+            # Aggregate counts for gender
+            gender_counts = filtered_df[gender_header].value_counts().reset_index()
+            gender_counts.columns = [gender_header, "Count"]
+            pie_chart = px.pie(
+                gender_counts,
+                names=gender_header,
+                values="Count",
+                title=f"Gender Distribution for {selected_disease}",
+                color=gender_header,
+                color_discrete_map={"F": "pink", "M": "blue"},
+                hover_data={"Count": True}
+            )
             st.plotly_chart(pie_chart, use_container_width=True)
 
-            # Create a pivot table: group by disease and gender, count entries.
+            # Create a pivot table for all diseases.
             group_df = df.groupby([disease_header, gender_header]).size().reset_index(name="Count")
             pivot_df = group_df.pivot(index=disease_header, columns=gender_header, values="Count").fillna(0).astype(int)
-            # Compute age statistics if an Age column is selected.
             if age_header:
                 age_stats = df.groupby(disease_header)[age_header].agg(['mean', 'min', 'max']).rename(
                     columns={'mean': 'Avg Age', 'min': 'Min Age', 'max': 'Max Age'})
                 pivot_df = pivot_df.merge(age_stats, left_index=True, right_index=True, how="left")
 
-            # Define a style function for the pivot table.
+            # Style function: only highlight individual cells that are 0.
             def style_row(row):
-                # Determine if both genders are present
-                f_val = row.get("F", np.nan)
-                m_val = row.get("M", np.nan)
-                if (pd.notnull(f_val) and f_val == 0 and pd.notnull(m_val) and m_val > 0) or \
-                   (pd.notnull(m_val) and m_val == 0 and pd.notnull(f_val) and f_val > 0):
-                    return ["background-color: yellow; font-weight: bold;" for _ in row.index]
-                styled = []
+                styles = []
                 for col in row.index:
                     if col == "F":
-                        styled.append("background-color: pink; color: black;")
+                        if row[col] == 0:
+                            styles.append("background-color: yellow; font-weight: bold;")
+                        else:
+                            styles.append("background-color: pink; color: black;")
                     elif col == "M":
-                        styled.append("background-color: blue; color: white;")
+                        if row[col] == 0:
+                            styles.append("background-color: yellow; font-weight: bold;")
+                        else:
+                            styles.append("background-color: blue; color: white;")
                     else:
-                        styled.append("")
-                return styled
+                        styles.append("")
+                return styles
 
             st.markdown("### Disease & Gender Table with Age Metrics")
             pivot_styled = pivot_df.style.apply(style_row, axis=1)
@@ -632,9 +641,8 @@ def posters_page():
     for i, poster in enumerate(poster_files):
         with cols[i % 3]:
             try:
-                # Assume posters are in an "images" folder
                 poster_path = os.path.join("images", poster)
-                st.image(poster_path, caption=f"Poster {i+1}", use_container_width=True)
+                st.image(poster_path, caption=f"Poster {i+1}")
             except Exception as e:
                 logging.error(f"Error loading poster {poster}", exc_info=True)
                 st.error(f"Error loading poster {poster}: {e}")
