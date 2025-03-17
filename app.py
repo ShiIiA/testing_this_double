@@ -40,9 +40,6 @@ st.set_page_config(
 
 # ------------------------- THEME & STYLE FUNCTIONS -------------------------
 def set_background():
-    """
-    Set a high-contrast light theme for the app.
-    """
     style = """
     <style>
     .stApp {
@@ -61,9 +58,6 @@ def set_background():
 set_background()
 
 def set_gradient_progress_bar():
-    """
-    Set a gradient for the progress bar.
-    """
     st.markdown(
         """
         <style>
@@ -86,9 +80,6 @@ if "df_results" not in st.session_state:
 # ------------------------- MODEL & HELPER FUNCTIONS -------------------------
 @st.cache_resource(show_spinner=True)
 def load_chexnet_model():
-    """
-    Load the pre-trained DenseNet-121 (CheXNet) model.
-    """
     model = models.densenet121(weights=DenseNet121_Weights.IMAGENET1K_V1)
     model.classifier = nn.Linear(1024, 2)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -104,9 +95,6 @@ except Exception as e:
     st.error(f"🚨 Error loading CheXNet model: {e}")
 
 def unify_gender_label(label):
-    """
-    Convert various representations of gender into 'M' or 'F'.
-    """
     text = str(label).strip().lower()
     male_keywords = ["m", "male", "man", "masculin"]
     female_keywords = ["f", "female", "woman", "femme"]
@@ -117,9 +105,6 @@ def unify_gender_label(label):
     return "Unknown"
 
 def unify_disease_label(label):
-    """
-    Standardize disease labels to either 'No Disease' or retain the original label.
-    """
     text = str(label).strip().lower()
     no_disease_keywords = ["no finding", "none", "negative", "normal", "0", "false", "no disease"]
     if any(kw in text for kw in no_disease_keywords):
@@ -128,9 +113,6 @@ def unify_disease_label(label):
 
 @st.cache_resource(show_spinner=True)
 def preprocess_image(image):
-    """
-    Preprocess the image: resize and convert to tensor.
-    """
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor()
@@ -153,9 +135,6 @@ PREDEFINED_ANSWERS = {
 }
 
 def static_chatbot(user_input):
-    """
-    Return a predefined answer based on the user input.
-    """
     user_input = user_input.lower().strip()
     for key in PREDEFINED_ANSWERS:
         if key in user_input:
@@ -164,7 +143,6 @@ def static_chatbot(user_input):
 
 # ------------------------- PAGE FUNCTIONS -------------------------
 def home_page():
-    """Display the Home page with project overview and thank you message."""
     st.title("🏠 Home")
     st.markdown("## Importance of Gender Bias in AI")
     st.markdown(
@@ -189,7 +167,6 @@ def home_page():
     )
 
 def upload_data_page():
-    """Allow the user to upload a CSV or Excel dataset and preview it."""
     st.title("📂 Upload Data")
     uploaded_file = st.file_uploader("Upload your dataset (CSV/XLSX)", type=["csv", "xlsx"],
                                      help="Upload a CSV or Excel file containing your data.")
@@ -207,17 +184,6 @@ def upload_data_page():
         st.info("Please upload a dataset to continue.")
 
 def explore_data_page():
-    """
-    Display an interactive data exploration page.
-      - Users select columns for visualization using Altair.
-      - Users choose which columns represent Disease, Gender, and (optionally) Age.
-      - A pie chart shows the gender repartition (Females in pink, Males in blue)
-        for a selected disease category with a tooltip showing the count.
-      - A pivot table is created showing, for each disease, the counts per gender and,
-        if an Age column is selected, the average, minimum, and maximum age.
-      - In the table, cells for females are colored pink and for males blue.
-        Cells with a value of 0 are highlighted in yellow.
-    """
     st.title("📊 Explore Data & Prepare")
     df = st.session_state.df
     if df is not None:
@@ -231,11 +197,7 @@ def explore_data_page():
                         alt.X(f"{col}:Q", bin=alt.Bin(maxbins=20), title=col),
                         alt.Y("count()", title="Count"),
                         tooltip=[col, "count()"]
-                    ).properties(
-                        width=600,
-                        height=400,
-                        title=f"Histogram of {col}"
-                    )
+                    ).properties(width=600, height=400, title=f"Histogram of {col}")
                     st.altair_chart(chart, use_container_width=True)
                 else:
                     counts = df[col].value_counts().reset_index()
@@ -244,11 +206,7 @@ def explore_data_page():
                         alt.X(f"{col}:N", sort='-y', title=col),
                         alt.Y("Count:Q", title="Count"),
                         tooltip=[col, "Count"]
-                    ).properties(
-                        width=600,
-                        height=400,
-                        title=f"Bar Chart of {col}"
-                    )
+                    ).properties(width=600, height=400, title=f"Bar Chart of {col}")
                     st.altair_chart(chart, use_container_width=True)
         else:
             st.info("Please select at least one column for visualization.")
@@ -281,13 +239,15 @@ def explore_data_page():
             )
             st.plotly_chart(pie_chart, use_container_width=True)
 
-            group_df = df.groupby([disease_header, gender_header]).size().reset_index(name="Count")
+            group_df = df.groupby([disease_header, gender_header], as_index=False).size().rename(columns={'size': 'Count'})
             pivot_df = group_df.pivot(index=disease_header, columns=gender_header, values="Count").fillna(0).astype(int)
-            # Ensure columns for 'F' and 'M' exist.
+            # Ensure both 'F' and 'M' columns exist.
             for col in ["F", "M"]:
                 if col not in pivot_df.columns:
                     pivot_df[col] = 0
-            pivot_df = pivot_df[["F", "M"] + [col for col in pivot_df.columns if col not in ["F", "M"]]]
+            # Order columns so that F and M appear first.
+            ordered_cols = ["F", "M"] + [c for c in pivot_df.columns if c not in ["F", "M"]]
+            pivot_df = pivot_df[ordered_cols]
 
             if age_header:
                 age_stats = df.groupby(disease_header)[age_header].agg(['mean', 'min', 'max']).rename(
@@ -298,38 +258,31 @@ def explore_data_page():
                 styles = []
                 for col in row.index:
                     if col == "F":
-                        if row[col] == 0:
-                            styles.append("background-color: yellow; font-weight: bold;")
-                        else:
-                            styles.append("background-color: pink; color: black;")
+                        styles.append("background-color: yellow; font-weight: bold;" if row[col] == 0 else "background-color: pink; color: black;")
                     elif col == "M":
-                        if row[col] == 0:
-                            styles.append("background-color: yellow; font-weight: bold;")
-                        else:
-                            styles.append("background-color: blue; color: white;")
+                        styles.append("background-color: yellow; font-weight: bold;" if row[col] == 0 else "background-color: blue; color: white;")
                     else:
                         styles.append("")
                 return styles
 
             st.markdown("### Disease & Gender Table with Age Metrics")
-            pivot_styled = pivot_df.style.apply(style_row, axis=1)
-            st.dataframe(pivot_styled)
+            if pivot_df.size > 262144:
+                st.write("Pivot table too large to style. Displaying unstyled table:")
+                st.dataframe(pivot_df)
+            else:
+                pivot_styled = pivot_df.style.apply(style_row, axis=1)
+                st.dataframe(pivot_styled)
         else:
             st.info("Please select the appropriate Disease and Gender columns for visualization.")
     else:
         st.info("No data uploaded. Please use the Upload Data page.")
 
 def model_prediction_page():
-    """Allow the user to select a model and upload images for prediction."""
     st.title("🤖 Model Prediction")
     st.markdown("Select an AI model and upload chest X‑ray images for prediction.")
-    model_choice = st.selectbox("Select AI Model:", ["CheXNet", "CheXagent"],
-                                help="Choose the model to use for prediction.")
-    uploaded_images = st.file_uploader("Upload X‑ray Images", type=["png", "jpg", "jpeg"],
-                                        accept_multiple_files=True,
-                                        help="Upload one or more images.")
-    threshold = st.slider("Decision Threshold", 0.0, 1.0, 0.5, 0.01,
-                          help="Adjust the threshold for classifying images as positive for disease.")
+    model_choice = st.selectbox("Select AI Model:", ["CheXNet", "CheXagent"], help="Choose the model to use for prediction.")
+    uploaded_images = st.file_uploader("Upload X‑ray Images", type=["png", "jpg", "jpeg"], accept_multiple_files=True, help="Upload one or more images.")
+    threshold = st.slider("Decision Threshold", 0.0, 1.0, 0.5, 0.01, help="Adjust the threshold for classifying images as positive for disease.")
     if uploaded_images:
         with st.spinner("Processing images..."):
             progress_bar = st.progress(0)
@@ -348,15 +301,12 @@ def model_prediction_page():
                             disease_prob = probs[0, 1].item()
                             predicted_label = 1 if disease_prob >= threshold else 0
                     elif model_choice == "CheXagent":
-                        chexagent_pipe = pipeline("image-classification", model="StanfordAIMI/CheXagent-2-3b",
-                                                  trust_remote_code=True)
+                        chexagent_pipe = pipeline("image-classification", model="StanfordAIMI/CheXagent-2-3b", trust_remote_code=True)
                         result = chexagent_pipe(image)
                         disease_prob = result[0]["score"]
                         predicted_label = 1 if disease_prob >= threshold else 0
-                    new_row = {"Image_ID": img.name, "Gender": "Unknown", "Prediction": predicted_label,
-                               "Probability": disease_prob}
-                    st.session_state.df_results = pd.concat(
-                        [st.session_state.df_results, pd.DataFrame([new_row])], ignore_index=True)
+                    new_row = {"Image_ID": img.name, "Gender": "Unknown", "Prediction": predicted_label, "Probability": disease_prob}
+                    st.session_state.df_results = pd.concat([st.session_state.df_results, pd.DataFrame([new_row])], ignore_index=True)
                     st.success(f"Prediction: {'Disease Detected' if predicted_label == 1 else 'No Disease'} | Prob: {disease_prob:.2%}")
                 except Exception as e:
                     logging.error("Error during prediction", exc_info=True)
@@ -366,7 +316,6 @@ def model_prediction_page():
         st.info("Upload images to generate predictions.")
 
 def gender_bias_analysis_page():
-    """Analyze gender bias by comparing prediction rates between male and female groups."""
     st.title("⚖️ Gender Bias Analysis")
     df = st.session_state.df
     df_results = st.session_state.df_results
@@ -378,8 +327,7 @@ def gender_bias_analysis_page():
         image_id_col = st.session_state.get("image_id_col", None)
         if gender_col and disease_col and image_id_col:
             if "Unknown" in df_results["Gender"].values:
-                df_merged = pd.merge(df_results, df[[image_id_col, gender_col]], how="left",
-                                     left_on="Image_ID", right_on=image_id_col)
+                df_merged = pd.merge(df_results, df[[image_id_col, gender_col]], how="left", left_on="Image_ID", right_on=image_id_col)
                 df_merged["Gender"] = df_merged[gender_col].fillna("Unknown")
                 st.session_state.df_results = df_merged[["Image_ID", "Gender", "Prediction", "Probability"]]
                 df_results = st.session_state.df_results
@@ -399,7 +347,6 @@ def gender_bias_analysis_page():
             st.success("Bias difference is within acceptable limits.")
 
 def bias_mitigation_simulation_page():
-    """Perform advanced fairness analysis and display mitigation approaches."""
     st.title("🛠️ Bias Mitigation & Simulation")
     st.markdown("### Advanced Fairness Analysis")
     df = st.session_state.df
@@ -454,17 +401,14 @@ def bias_mitigation_simulation_page():
         st.success("Mitigation recommendations complete!")
 
 def gender_bias_testing_page():
-    """Allow testing of bias mitigation through threshold adjustment."""
     st.title("🧪 Gender Bias Testing")
     st.markdown("### Test Bias Mitigation via Threshold Adjustment")
     df_results = st.session_state.df_results
     if df_results.empty:
         st.info("No prediction data available. Generate predictions first.")
     else:
-        thresh_F = st.slider("Threshold for Female", 0.0, 1.0, 0.5, 0.01,
-                             help="Adjust threshold for female predictions.")
-        thresh_M = st.slider("Threshold for Male", 0.0, 1.0, 0.5, 0.01,
-                             help="Adjust threshold for male predictions.")
+        thresh_F = st.slider("Threshold for Female", 0.0, 1.0, 0.5, 0.01, help="Adjust threshold for female predictions.")
+        thresh_M = st.slider("Threshold for Male", 0.0, 1.0, 0.5, 0.01, help="Adjust threshold for male predictions.")
         df_new = df_results.copy()
         def adjust_pred(row):
             if row["Gender"] == "M":
@@ -492,7 +436,6 @@ def gender_bias_testing_page():
         st.dataframe(df_new.head())
 
 def explainable_analysis_page():
-    """Perform explainable analysis on false predictions using textual data."""
     st.title("🔍 Explainable Analysis")
     st.markdown("This page analyzes textual features related to false predictions to help understand potential bias.")
     df = st.session_state.df
@@ -544,7 +487,6 @@ def explainable_analysis_page():
         st.info("WordCloud could not be generated.")
 
 def importance_gender_bias_page():
-    """Display the importance of addressing gender bias and cite key references."""
     st.title("📚 The Importance of Gender Bias")
     st.markdown(
         """
@@ -566,7 +508,6 @@ def importance_gender_bias_page():
     )
 
 def about_chexnet_model_page():
-    """Display information about the CheXNet model."""
     st.title("🧠 About CheXNet Model")
     st.markdown(
         """
@@ -580,7 +521,6 @@ def about_chexnet_model_page():
     )
 
 def about_chexagent_page():
-    """Display information about the CheXagent model."""
     st.title("🧠 About CheXagent")
     st.markdown(
         """
@@ -594,7 +534,6 @@ def about_chexagent_page():
     )
 
 def meet_the_team_page():
-    """Display team members with pictures using a tab layout."""
     st.title("👥 Meet the Team")
     team_members = [
         {"name": "Yuying", "role": "Data Scientist", "image": os.path.join("images", "Yuying.webp")},
@@ -614,7 +553,6 @@ def meet_the_team_page():
             st.write(f"*{member['role']}*")
 
 def chatbot_page():
-    """A static chatbot that returns predefined answers about gender bias."""
     st.title("💬 Chatbot")
     st.markdown("Ask questions about gender bias in radiology. This chatbot provides predefined answers.")
     if "chat_history" not in st.session_state:
@@ -632,7 +570,6 @@ def chatbot_page():
          st.markdown(f"**{speaker}:** {message}")
 
 def posters_page():
-    """Display project posters."""
     st.title("🖼️ Posters")
     st.markdown("Below are our project posters:")
     poster_files = ["1.png", "2.png", "3.png", "4.png", "5.png"]
@@ -646,7 +583,6 @@ def posters_page():
                 st.error(f"Image not found: {poster_path}")
 
 def datathon_resources_page():
-    """Display WiDS Datathon 2025 resources."""
     st.title("📖 Datathon Resources")
     st.markdown(
         """
@@ -660,7 +596,6 @@ def datathon_resources_page():
     )
 
 def project_overview_page():
-    """Display an overview of the project and its impact."""
     st.title("📈 Project Overview")
     st.markdown(
         """
@@ -683,7 +618,6 @@ def project_overview_page():
     )
 
 def feedback_page():
-    """Allow users to provide feedback about the app."""
     st.title("📝 Feedback")
     st.markdown("We value your input! Please share your thoughts and suggestions below:")
     feedback = st.text_area("Your Feedback", help="Enter your comments here...")
@@ -691,7 +625,6 @@ def feedback_page():
         st.success("Thank you for your feedback!")
 
 def interactive_demos_page():
-    """Display interactive side-by-side predictions from CheXNet and CheXagent."""
     st.title("🔍 Interactive Demonstrations")
     st.markdown("Compare predictions from CheXNet and CheXagent side by side.")
     uploaded_image = st.file_uploader("Upload a single X‑ray image", type=["png", "jpg", "jpeg"])
@@ -700,16 +633,13 @@ def interactive_demos_page():
         image = Image.open(uploaded_image).convert("RGB")
         st.image(image, caption="Uploaded X‑ray", width=300)
         tensor_img = preprocess_image(image)
-        # CheXNet prediction
         tensor_img_chexnet = tensor_img.to(device)
         with torch.no_grad():
             logits = chexnet_model(tensor_img_chexnet)
             probs = F.softmax(logits, dim=1)
             chexnet_prob = probs[0, 1].item()
             chexnet_pred = 1 if chexnet_prob >= threshold else 0
-        # CheXagent prediction
-        chexagent_pipe = pipeline("image-classification", model="StanfordAIMI/CheXagent-2-3b",
-                                  trust_remote_code=True)
+        chexagent_pipe = pipeline("image-classification", model="StanfordAIMI/CheXagent-2-3b", trust_remote_code=True)
         result = chexagent_pipe(image)
         chexagent_prob = result[0]["score"]
         chexagent_pred = 1 if chexagent_prob >= threshold else 0
@@ -727,7 +657,6 @@ def interactive_demos_page():
         st.info("Upload an image for comparison.")
 
 def live_metrics_dashboard_page():
-    """Display live metrics and a prediction distribution chart."""
     st.title("📊 Live Metrics Dashboard")
     st.markdown("This dashboard displays key metrics from current predictions.")
     df_results = st.session_state.df_results
