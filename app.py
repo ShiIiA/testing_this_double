@@ -196,7 +196,6 @@ def upload_data_page():
     if uploaded_file:
         try:
             df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
-            # Remove duplicate columns
             df = df.loc[:, ~df.columns.duplicated()]
             st.session_state.df = df
             st.write("**Preview of Uploaded Data:**")
@@ -216,7 +215,8 @@ def explore_data_page():
         for a selected disease category with a tooltip showing the count.
       - A pivot table is created showing, for each disease, the counts per gender and,
         if an Age column is selected, the average, minimum, and maximum age.
-      - In the table, cells for females are pink and for males are blue. Cells with a value of 0 are highlighted in yellow.
+      - In the table, cells for females are colored pink and for males blue.
+        Cells with a value of 0 are highlighted in yellow.
     """
     st.title("📊 Explore Data & Prepare")
     df = st.session_state.df
@@ -259,7 +259,6 @@ def explore_data_page():
         st.dataframe(missing)
 
         st.markdown("### Disease and Gender Visualization")
-        # Let the user choose which columns represent disease, gender, and optionally age.
         disease_header = st.selectbox("Select Disease Column for Visualization:", df.columns.tolist())
         gender_header = st.selectbox("Select Gender Column for Visualization:", df.columns.tolist())
         age_header = st.selectbox("Select Age Column (optional):", [None] + df.columns.tolist())
@@ -267,7 +266,6 @@ def explore_data_page():
             df[age_header] = pd.to_numeric(df[age_header], errors='coerce')
 
         if disease_header and gender_header:
-            # Pre-aggregate counts for the pie chart.
             selected_disease = st.selectbox("Select Disease Category:", options=sorted(df[disease_header].dropna().unique()))
             filtered_df = df[df[disease_header] == selected_disease]
             gender_counts = filtered_df[gender_header].value_counts().reset_index()
@@ -283,22 +281,32 @@ def explore_data_page():
             )
             st.plotly_chart(pie_chart, use_container_width=True)
 
-            # Create pivot table.
             group_df = df.groupby([disease_header, gender_header]).size().reset_index(name="Count")
             pivot_df = group_df.pivot(index=disease_header, columns=gender_header, values="Count").fillna(0).astype(int)
+            # Ensure columns for 'F' and 'M' exist.
+            for col in ["F", "M"]:
+                if col not in pivot_df.columns:
+                    pivot_df[col] = 0
+            pivot_df = pivot_df[["F", "M"] + [col for col in pivot_df.columns if col not in ["F", "M"]]]
+
             if age_header:
                 age_stats = df.groupby(disease_header)[age_header].agg(['mean', 'min', 'max']).rename(
                     columns={'mean': 'Avg Age', 'min': 'Min Age', 'max': 'Max Age'})
                 pivot_df = pivot_df.merge(age_stats, left_index=True, right_index=True, how="left")
 
-            # Style function: color cells for F and M; only cells with value 0 get yellow.
             def style_row(row):
                 styles = []
                 for col in row.index:
                     if col == "F":
-                        styles.append("background-color: yellow; font-weight: bold;" if row[col] == 0 else "background-color: pink; color: black;")
+                        if row[col] == 0:
+                            styles.append("background-color: yellow; font-weight: bold;")
+                        else:
+                            styles.append("background-color: pink; color: black;")
                     elif col == "M":
-                        styles.append("background-color: yellow; font-weight: bold;" if row[col] == 0 else "background-color: blue; color: white;")
+                        if row[col] == 0:
+                            styles.append("background-color: yellow; font-weight: bold;")
+                        else:
+                            styles.append("background-color: blue; color: white;")
                     else:
                         styles.append("")
                 return styles
@@ -597,10 +605,11 @@ def meet_the_team_page():
     tabs = st.tabs([member["name"] for member in team_members])
     for tab, member in zip(tabs, team_members):
         with tab:
-            try:
-                st.image(member["image"], width=150)
-            except Exception as e:
-                st.error(f"Unable to load image for {member['name']}")
+            poster_path = member["image"]
+            if os.path.exists(poster_path):
+                st.image(poster_path, width=150)
+            else:
+                st.error(f"Image not found: {poster_path}")
             st.write(f"**{member['name']}**")
             st.write(f"*{member['role']}*")
 
@@ -630,12 +639,11 @@ def posters_page():
     cols = st.columns(3)
     for i, poster in enumerate(poster_files):
         with cols[i % 3]:
-            try:
-                poster_path = os.path.join("images", poster)
+            poster_path = os.path.join("images", poster)
+            if os.path.exists(poster_path):
                 st.image(poster_path, caption=f"Poster {i+1}")
-            except Exception as e:
-                logging.error(f"Error loading poster {poster}", exc_info=True)
-                st.error(f"Error loading poster {poster}: {e}")
+            else:
+                st.error(f"Image not found: {poster_path}")
 
 def datathon_resources_page():
     """Display WiDS Datathon 2025 resources."""
@@ -681,7 +689,6 @@ def feedback_page():
     feedback = st.text_area("Your Feedback", help="Enter your comments here...")
     if st.button("Submit Feedback"):
         st.success("Thank you for your feedback!")
-        # Optionally, save feedback to a file or database.
 
 def interactive_demos_page():
     """Display interactive side-by-side predictions from CheXNet and CheXagent."""
