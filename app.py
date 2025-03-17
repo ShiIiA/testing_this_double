@@ -13,6 +13,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+import plotly.express as px
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
@@ -207,18 +208,17 @@ def upload_data_page():
         st.info("Please upload a dataset to continue.")
 
 def explore_data_page():
-    """Display an interactive data exploration page using Altair."""
+    """Display an interactive data exploration page using Altair and Plotly for disease visualization."""
     st.title("📊 Explore Data & Prepare")
     df = st.session_state.df
     if df is not None:
         st.subheader("Select Columns for Visualization")
         selected_cols = st.multiselect("Choose one or more columns to visualize:", df.columns.tolist())
-        # Ensure necessary columns for EDA are converted correctly
         if selected_cols:
             for col in selected_cols:
                 st.markdown(f"### Visualization for **{col}**")
                 if pd.api.types.is_numeric_dtype(df[col]):
-                    # Create a histogram using Altair with binning.
+                    # For numeric data, create a histogram with Altair.
                     chart = alt.Chart(df).mark_bar().encode(
                         alt.X(f"{col}:Q", bin=alt.Bin(maxbins=20), title=col),
                         alt.Y("count()", title="Count"),
@@ -232,7 +232,7 @@ def explore_data_page():
                 else:
                     # For categorical data, create a bar chart of counts.
                     counts = df[col].value_counts().reset_index()
-                    counts.columns = [col, "Count"]
+                    counts.columns = [col, 'Count']
                     chart = alt.Chart(counts).mark_bar().encode(
                         alt.X(f"{col}:N", sort='-y', title=col),
                         alt.Y("Count:Q", title="Count"),
@@ -246,11 +246,20 @@ def explore_data_page():
         else:
             st.info("Please select at least one column for visualization.")
 
-        # Show a missing values summary
         st.markdown("### Missing Values Summary")
         missing = df.isnull().sum().reset_index()
         missing.columns = ['Column', 'Missing Values']
         st.dataframe(missing)
+
+        # ----------------- New Disease Visualization Section -----------------
+        if "Disease" in df.columns and "Gender" in df.columns:
+            st.markdown("### Gender Distribution per Disease")
+            selected_disease = st.selectbox("Select Disease:", options=sorted(df["Disease"].unique()))
+            disease_df = df[df["Disease"] == selected_disease]
+            pie_chart = px.pie(disease_df, names="Gender", title=f"Gender Distribution for {selected_disease}")
+            st.plotly_chart(pie_chart, use_container_width=True)
+        else:
+            st.info("For disease visualization, ensure that the dataset contains 'Disease' and 'Gender' columns.")
     else:
         st.info("No data uploaded. Please use the Upload Data page.")
 
