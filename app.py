@@ -213,9 +213,9 @@ def explore_data_page():
       - Users select columns for visualization using Altair.
       - Users choose which columns represent Disease, Gender, and (optionally) Age.
       - A pie chart shows the gender repartition for a selected disease category.
-      - A pivot table is created showing, for each disease, the counts for each gender
-        along with average, minimum, and maximum age (if an Age column is selected).
-      - The table styles the F and M columns in pink and blue, respectively,
+      - A pivot table is created showing, for each disease, the counts per gender and,
+        if an Age column is selected, the average, minimum, and maximum age.
+      - The pivot table styles the "F" column in pink and the "M" column in blue,
         and highlights rows in yellow when only one gender is present.
     """
     st.title("📊 Explore Data & Prepare")
@@ -259,12 +259,13 @@ def explore_data_page():
         st.dataframe(missing)
 
         st.markdown("### Disease and Gender Visualization")
-        # Let the user choose which columns represent disease and gender
+        # Let the user choose which columns represent disease, gender, and optionally age.
         disease_header = st.selectbox("Select Disease Column for Visualization:", df.columns.tolist())
         gender_header = st.selectbox("Select Gender Column for Visualization:", df.columns.tolist())
-        # Optionally select Age column (only options that contain 'age')
-        age_options = [col for col in df.columns if "age" in col.lower()]
-        age_header = st.selectbox("Select Age Column (optional):", age_options) if age_options else None
+        age_header = st.selectbox("Select Age Column (optional):", [None] + df.columns.tolist())
+        if age_header:
+            # Ensure the selected age column is numeric.
+            df[age_header] = pd.to_numeric(df[age_header], errors='coerce')
 
         if disease_header and gender_header:
             # Pie Chart for a selected disease category
@@ -274,10 +275,10 @@ def explore_data_page():
                                title=f"Gender Distribution for {selected_disease}")
             st.plotly_chart(pie_chart, use_container_width=True)
 
-            # Create a pivot table: for each disease, count number of each gender.
+            # Create a pivot table: group by disease and gender, count entries.
             group_df = df.groupby([disease_header, gender_header]).size().reset_index(name="Count")
             pivot_df = group_df.pivot(index=disease_header, columns=gender_header, values="Count").fillna(0).astype(int)
-            # Compute age statistics if age_header is selected.
+            # Compute age statistics if an Age column is selected.
             if age_header:
                 age_stats = df.groupby(disease_header)[age_header].agg(['mean', 'min', 'max']).rename(
                     columns={'mean': 'Avg Age', 'min': 'Min Age', 'max': 'Max Age'})
@@ -291,9 +292,9 @@ def explore_data_page():
                 styled = []
                 for col in row.index:
                     if col == "F":
-                        styled.append("background-color: #ff69b4; color: white;")
+                        styled.append("background-color: pink; color: black;")
                     elif col == "M":
-                        styled.append("background-color: #1e90ff; color: white;")
+                        styled.append("background-color: blue; color: white;")
                     else:
                         styled.append("")
                 return styled
