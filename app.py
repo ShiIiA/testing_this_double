@@ -103,7 +103,9 @@ except Exception as e:
     st.error(f"🚨 Error loading CheXNet model: {e}")
 
 def unify_gender_label(label):
-    """Convert various representations of gender into 'M' or 'F'."""
+    """
+    Convert various representations of gender into 'M' or 'F'.
+    """
     text = str(label).strip().lower()
     male_keywords = ["m", "male", "man", "masculin"]
     female_keywords = ["f", "female", "woman", "femme"]
@@ -114,7 +116,9 @@ def unify_gender_label(label):
     return "Unknown"
 
 def unify_disease_label(label):
-    """Standardize disease labels to either 'No Disease' or retain the original label."""
+    """
+    Standardize disease labels to either 'No Disease' or retain the original label.
+    """
     text = str(label).strip().lower()
     no_disease_keywords = ["no finding", "none", "negative", "normal", "0", "false", "no disease"]
     if any(kw in text for kw in no_disease_keywords):
@@ -203,7 +207,7 @@ def upload_data_page():
         st.info("Please upload a dataset to continue.")
 
 def explore_data_page():
-    """Display an interactive data exploration page using Plotly charts."""
+    """Display an improved interactive data exploration page."""
     st.title("📊 Explore Data & Prepare")
     df = st.session_state.df
     if df is not None:
@@ -214,7 +218,7 @@ def explore_data_page():
                                    help="Column showing disease status.")
         image_id_col = st.selectbox("🖼️ Select Image ID Column:", df.columns,
                                     help="Unique image identifier.")
-        # Convert Image ID column to string
+        # Convert Image ID column to string to avoid type conflicts
         df[image_id_col] = df[image_id_col].astype(str)
         df[gender_col] = df[gender_col].apply(unify_gender_label)
         df[disease_col] = df[disease_col].apply(unify_disease_label)
@@ -225,26 +229,41 @@ def explore_data_page():
         st.subheader("Data Summary")
         st.write(df.describe(include="all"))
 
+        st.markdown("### Missing Values")
+        missing = df.isnull().sum().reset_index()
+        missing.columns = ['Column', 'Missing Values']
+        st.dataframe(missing)
+
         st.markdown("#### Column Distributions")
-        # Use Plotly for interactive charts
-        for col in df.columns:
+        # Separate numeric and categorical columns
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        categorical_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
+
+        st.markdown("##### Numeric Columns")
+        for col in numeric_cols:
             try:
-                if pd.api.types.is_numeric_dtype(df[col]):
-                    # If boolean, convert to int
-                    if df[col].dtype == bool:
-                        data = df[col].astype(int)
-                    else:
-                        # Convert errors to NaN so non-numeric values (like "Unknown") are dropped.
-                        data = pd.to_numeric(df[col], errors='coerce')
-                    fig = px.histogram(data.dropna(), nbins=20, title=f"Distribution of {col}")
+                # If the column is boolean, convert it to integer
+                if df[col].dtype == bool:
+                    data = df[col].astype(int)
                 else:
-                    counts = df[col].value_counts().reset_index()
-                    counts.columns = [col, 'count']
-                    fig = px.bar(counts, x=col, y="count", title=f"Counts of {col}")
+                    # Coerce errors so that non-numeric values become NaN
+                    data = pd.to_numeric(df[col], errors='coerce')
+                fig = px.histogram(data.dropna(), nbins=20, title=f"Distribution of {col}")
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
-                logging.error(f"Error plotting column {col}", exc_info=True)
-                st.error(f"Error plotting column {col}: {e}")
+                logging.error(f"Error plotting numeric column {col}", exc_info=True)
+                st.error(f"Error plotting numeric column {col}: {e}")
+
+        st.markdown("##### Categorical Columns")
+        for col in categorical_cols:
+            try:
+                counts = df[col].value_counts().reset_index()
+                counts.columns = [col, "Count"]
+                fig = px.bar(counts, x=col, y="Count", title=f"Counts of {col}")
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                logging.error(f"Error plotting categorical column {col}", exc_info=True)
+                st.error(f"Error plotting categorical column {col}: {e}")
     else:
         st.info("No data uploaded. Please use the Upload Data page.")
 
@@ -565,7 +584,7 @@ def posters_page():
     for i, poster in enumerate(poster_files):
         with cols[i % 3]:
             try:
-                st.image(poster, caption=f"Poster {i+1}", use_column_width=True)
+                st.image(poster, caption=f"Poster {i+1}", use_container_width=True)
             except Exception as e:
                 logging.error(f"Error loading poster {poster}", exc_info=True)
                 st.error(f"Error loading poster {poster}: {e}")
@@ -634,7 +653,8 @@ def interactive_demos_page():
             chexnet_prob = probs[0, 1].item()
             chexnet_pred = 1 if chexnet_prob >= threshold else 0
         # CheXagent prediction
-        chexagent_pipe = pipeline("image-classification", model="StanfordAIMI/CheXagent-2-3b", trust_remote_code=True)
+        chexagent_pipe = pipeline("image-classification", model="StanfordAIMI/CheXagent-2-3b",
+                                  trust_remote_code=True)
         result = chexagent_pipe(image)
         chexagent_prob = result[0]["score"]
         chexagent_pred = 1 if chexagent_prob >= threshold else 0
