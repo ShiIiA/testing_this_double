@@ -38,7 +38,7 @@ st.set_page_config(
 
 # ========== THEME & STYLE FUNCTIONS ==========
 def set_background():
-    # Use a fixed light theme with high contrast for text
+    # Fixed light theme with high contrast for clear text visibility.
     style = """
     <style>
     .stApp {
@@ -158,6 +158,13 @@ def home_page():
         """
     )
     st.info("Use the sidebar to navigate through the app.")
+    st.markdown("---")
+    st.markdown("### Thank You")
+    st.markdown(
+        """
+        **Thank you to the mentors, sponsors, and jury of the WiDS Datathon for their invaluable support.**
+        """
+    )
 
 def upload_data_page():
     st.title("📂 Upload Data")
@@ -183,6 +190,8 @@ def explore_data_page():
         gender_col = st.selectbox("🛑 Select Gender Column:", df.columns, help="Column indicating gender.")
         disease_col = st.selectbox("🩺 Select Disease Column:", df.columns, help="Column showing disease status.")
         image_id_col = st.selectbox("🖼️ Select Image ID Column:", df.columns, help="Unique image identifier.")
+        # Force the Image ID column to string to avoid type conflicts later.
+        df[image_id_col] = df[image_id_col].astype(str)
         df[gender_col] = df[gender_col].apply(unify_gender_label)
         df[disease_col] = df[disease_col].apply(unify_disease_label)
         st.session_state.gender_col = gender_col
@@ -360,6 +369,54 @@ def gender_bias_testing_page():
         st.markdown("#### Adjusted Predictions Preview")
         st.dataframe(df_new.head())
 
+def explainable_analysis_page():
+    st.title("🔍 Explainable Analysis")
+    st.markdown("This page analyzes textual features related to false predictions to help understand potential bias.")
+    df = st.session_state.df
+    df_results = st.session_state.df_results
+    if df is None or df_results.empty:
+        st.info("No prediction data available.")
+        return
+    disease_col = st.session_state.get("disease_col", None)
+    image_id_col = st.session_state.get("image_id_col", None)
+    if disease_col is None or image_id_col is None:
+        st.info("Required column selections are missing.")
+        return
+    merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left", left_on="Image_ID", right_on=image_id_col)
+    merged = merged.rename(columns={disease_col: "True_Label"})
+    merged["Correct"] = merged.apply(lambda row: (row["Prediction"] == 1 and row["True_Label"] != "No Disease") or (row["Prediction"] == 0 and row["True_Label"] == "No Disease"), axis=1)
+    st.write("Merged Predictions with Ground Truth:")
+    st.dataframe(merged.head())
+    symptom_col = None
+    for col in df.columns:
+        if "symptom" in col.lower():
+            symptom_col = col
+            break
+    if symptom_col is None:
+        st.info("No 'Symptoms' column found for textual analysis.")
+        return
+    st.markdown("### Textual Analysis of Symptoms in False Predictions")
+    false_preds = merged[merged["Correct"] == False]
+    st.write(f"Number of false predictions: {false_preds.shape[0]}")
+    if false_preds.empty:
+        st.info("No false predictions to analyze.")
+        return
+    text_data = " ".join(false_preds[symptom_col].dropna().astype(str).tolist())
+    words = re.findall(r'\w+', text_data.lower())
+    word_counts = Counter(words)
+    common_words = word_counts.most_common(20)
+    st.markdown("#### Most Common Words in Symptoms (False Predictions)")
+    st.table(common_words)
+    try:
+        from wordcloud import WordCloud
+        wordcloud = WordCloud(width=800, height=400, background_color="white").generate(text_data)
+        plt.figure(figsize=(10,5))
+        plt.imshow(wordcloud, interpolation="bilinear")
+        plt.axis("off")
+        st.pyplot(plt)
+    except Exception as e:
+        st.info("WordCloud could not be generated.")
+
 def importance_gender_bias_page():
     st.title("📚 The Importance of Gender Bias")
     st.markdown(
@@ -431,6 +488,7 @@ def chatbot_page():
          user_message = st.text_input("Your question:", key="chat_message", help="e.g., 'What is gender bias?'")
          submitted = st.form_submit_button("Send")
          if submitted and user_message:
+             # Use the static chatbot to respond.
              response = static_chatbot(user_message)
              st.session_state.chat_history.append(("You", user_message))
              st.session_state.chat_history.append(("Chatbot", response))
@@ -482,26 +540,6 @@ def project_overview_page():
         - Comprehensive data exploration and visualization.
         - Comparison of multiple AI models.
         - Bias analysis and explainable analysis.
-        """
-    )
-
-def sponsors_mentors_page():
-    st.title("🎖️ Sponsors & Mentors")
-    st.markdown(
-        """
-        **Sponsors:**
-
-        - Thales (Responsible AI Excellence Award)
-        - Datacraft
-        - emlyon business school
-
-        **Mentors:**
-
-        - Imène Brigui, PhD – WiDS Ambassador, emlyon
-        - Isabelle Hilali – Founder & CEO, Datacraft
-        - Frédérique Richert – Strategic Designer, Thales
-        - Samia Jnini – Head of Generative AI Service Line, Atos
-        - Others...
         """
     )
 
@@ -590,7 +628,6 @@ page_options = [
     "👥 Meet the Team",
     "📖 Datathon Resources",
     "📈 Project Overview",
-    "🎖️ Sponsors & Mentors",
     "📝 Feedback",
     "🔍 Interactive Demonstrations",
     "📊 Live Metrics Dashboard"
@@ -631,8 +668,6 @@ elif selected_page == "📖 Datathon Resources":
     datathon_resources_page()
 elif selected_page == "📈 Project Overview":
     project_overview_page()
-elif selected_page == "🎖️ Sponsors & Mentors":
-    sponsors_mentors_page()
 elif selected_page == "📝 Feedback":
     feedback_page()
 elif selected_page == "🔍 Interactive Demonstrations":
