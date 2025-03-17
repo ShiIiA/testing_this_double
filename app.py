@@ -239,13 +239,14 @@ def explore_data_page():
             )
             st.plotly_chart(pie_chart, use_container_width=True)
 
-            group_df = df.groupby([disease_header, gender_header], as_index=False).size().rename(columns={'size': 'Count'})
+            # Use groupby with as_index=False to avoid reset_index conflict.
+            group_df = df.groupby([disease_header, gender_header], as_index=False).size().rename(columns={"size": "Count"})
             pivot_df = group_df.pivot(index=disease_header, columns=gender_header, values="Count").fillna(0).astype(int)
-            # Ensure both 'F' and 'M' columns exist.
+            # Ensure both "F" and "M" exist.
             for col in ["F", "M"]:
                 if col not in pivot_df.columns:
                     pivot_df[col] = 0
-            # Order columns so that F and M appear first.
+            # Order columns so that "F" and "M" are first.
             ordered_cols = ["F", "M"] + [c for c in pivot_df.columns if c not in ["F", "M"]]
             pivot_df = pivot_df[ordered_cols]
 
@@ -266,6 +267,7 @@ def explore_data_page():
                 return styles
 
             st.markdown("### Disease & Gender Table with Age Metrics")
+            # If pivot table is too large to style, show unstyled table.
             if pivot_df.size > 262144:
                 st.write("Pivot table too large to style. Displaying unstyled table:")
                 st.dataframe(pivot_df)
@@ -356,13 +358,9 @@ def bias_mitigation_simulation_page():
     else:
         advanced = st.checkbox("Use advanced fairness approach", help="Enable advanced fairness metrics computation.")
         if advanced:
-            df_merged = pd.merge(df, df_results, how="inner",
-                                 left_on=st.session_state.get("image_id_col", "Image_ID"),
-                                 right_on="Image_ID")
-            target_col = st.selectbox("Select Ground-Truth Disease Column (Advanced):", df.columns.tolist(),
-                                        help="Choose the column with true disease labels.")
-            sensitive_col = st.selectbox("Select Sensitive Attribute (Advanced):", df.columns.tolist(),
-                                         help="Choose the sensitive attribute (e.g., Gender).")
+            df_merged = pd.merge(df, df_results, how="inner", left_on=st.session_state.get("image_id_col", "Image_ID"), right_on="Image_ID")
+            target_col = st.selectbox("Select Ground-Truth Disease Column (Advanced):", df.columns.tolist(), help="Choose the column with true disease labels.")
+            sensitive_col = st.selectbox("Select Sensitive Attribute (Advanced):", df.columns.tolist(), help="Choose the sensitive attribute (e.g., Gender).")
             if target_col and sensitive_col:
                 try:
                     y_true = df_merged[target_col]
@@ -558,8 +556,7 @@ def chatbot_page():
     if "chat_history" not in st.session_state:
          st.session_state.chat_history = []
     with st.form("chat_form", clear_on_submit=True):
-         user_message = st.text_input("Your question:", key="chat_message",
-                                      help="For example, 'What is gender bias?'")
+         user_message = st.text_input("Your question:", key="chat_message", help="For example, 'What is gender bias?'")
          submitted = st.form_submit_button("Send")
          if submitted and user_message:
              response = static_chatbot(user_message)
@@ -572,7 +569,7 @@ def chatbot_page():
 def posters_page():
     st.title("🖼️ Posters")
     st.markdown("Below are our project posters:")
-    poster_files = ["1.png", "2.png", "3.png", "4.png", "5.png"]
+    poster_files = ["1.png", "4.png", "5.png"]
     cols = st.columns(3)
     for i, poster in enumerate(poster_files):
         with cols[i % 3]:
