@@ -213,7 +213,7 @@ def explore_data_page():
       - Users select columns for visualization using Altair.
       - Users choose which columns represent Disease, Gender, and (optionally) Age.
       - A pie chart shows the gender repartition (Females in pink, Males in blue)
-        for a selected disease category with count tooltip.
+        for a selected disease category with a tooltip showing the count.
       - A pivot table is created showing, for each disease, the counts per gender and,
         if an Age column is selected, the average, minimum, and maximum age.
       - In the table, cells for females are pink and for males are blue. Cells with a value of 0 are highlighted in yellow.
@@ -267,13 +267,9 @@ def explore_data_page():
             df[age_header] = pd.to_numeric(df[age_header], errors='coerce')
 
         if disease_header and gender_header:
-            # Build a pre-aggregated DataFrame for the pie chart.
-            disease_counts = df[disease_header].value_counts().reset_index()
-            disease_counts.columns = [disease_header, "Total"]
+            # Pre-aggregate counts for the pie chart.
             selected_disease = st.selectbox("Select Disease Category:", options=sorted(df[disease_header].dropna().unique()))
-            # Filter data for the selected disease
             filtered_df = df[df[disease_header] == selected_disease]
-            # Aggregate counts for gender
             gender_counts = filtered_df[gender_header].value_counts().reset_index()
             gender_counts.columns = [gender_header, "Count"]
             pie_chart = px.pie(
@@ -283,11 +279,11 @@ def explore_data_page():
                 title=f"Gender Distribution for {selected_disease}",
                 color=gender_header,
                 color_discrete_map={"F": "pink", "M": "blue"},
-                hover_data={"Count": True}
+                hover_data=["Count"]
             )
             st.plotly_chart(pie_chart, use_container_width=True)
 
-            # Create a pivot table for all diseases.
+            # Create pivot table.
             group_df = df.groupby([disease_header, gender_header]).size().reset_index(name="Count")
             pivot_df = group_df.pivot(index=disease_header, columns=gender_header, values="Count").fillna(0).astype(int)
             if age_header:
@@ -295,20 +291,14 @@ def explore_data_page():
                     columns={'mean': 'Avg Age', 'min': 'Min Age', 'max': 'Max Age'})
                 pivot_df = pivot_df.merge(age_stats, left_index=True, right_index=True, how="left")
 
-            # Style function: only highlight individual cells that are 0.
+            # Style function: color cells for F and M; only cells with value 0 get yellow.
             def style_row(row):
                 styles = []
                 for col in row.index:
                     if col == "F":
-                        if row[col] == 0:
-                            styles.append("background-color: yellow; font-weight: bold;")
-                        else:
-                            styles.append("background-color: pink; color: black;")
+                        styles.append("background-color: yellow; font-weight: bold;" if row[col] == 0 else "background-color: pink; color: black;")
                     elif col == "M":
-                        if row[col] == 0:
-                            styles.append("background-color: yellow; font-weight: bold;")
-                        else:
-                            styles.append("background-color: blue; color: white;")
+                        styles.append("background-color: yellow; font-weight: bold;" if row[col] == 0 else "background-color: blue; color: white;")
                     else:
                         styles.append("")
                 return styles
