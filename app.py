@@ -25,7 +25,7 @@ from scipy.stats import chi2_contingency
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score
 from torchvision.models import DenseNet121_Weights
 import plotly.express as px
-import openai
+from transformers import pipeline  # For CheXagent model
 
 # ========== PAGE CONFIGURATION & UX ENHANCEMENTS ==========
 st.set_page_config(
@@ -36,7 +36,7 @@ st.set_page_config(
 )
 
 def set_background():
-    # Lighter background gradient
+    # Lighter background gradient for better readability
     st.markdown(
         """
         <style>
@@ -75,21 +75,6 @@ if "df" not in st.session_state:
 if "df_results" not in st.session_state:
     st.session_state.df_results = pd.DataFrame(columns=["Image_ID", "Gender", "Prediction", "Probability"])
 
-# ========== OPENAI API CONFIGURATION ==========
-openai.api_key = st.secrets["OPENAI_API_KEY"]
-
-def openai_chatbot(user_input):
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",  # or use "gpt-4" if available
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant specialized in AI bias analysis."},
-            {"role": "user", "content": user_input},
-        ],
-        max_tokens=150,
-        temperature=0.7,
-    )
-    return response["choices"][0]["message"]["content"]
-
 # ========== MODEL & HELPER FUNCTIONS ==========
 @st.cache_resource(show_spinner=True)
 def load_chexnet_model():
@@ -102,10 +87,10 @@ def load_chexnet_model():
     return model, device
 
 try:
-    model, device = load_chexnet_model()
-    st.success("✅ Model Loaded Successfully!")
+    chexnet_model, device = load_chexnet_model()
+    st.success("✅ CheXNet Model Loaded Successfully!")
 except Exception as e:
-    st.error(f"🚨 Error loading model: {e}")
+    st.error(f"🚨 Error loading CheXNet model: {e}")
 
 def unify_gender_label(label):
     text = str(label).strip().lower()
@@ -132,6 +117,28 @@ def preprocess_image(image):
     ])
     return transform(image).unsqueeze(0)
 
+# ========== PREDEFINED (STATIC) CHATBOT ==========
+PREDEFINED_ANSWERS = {
+    "what is gender bias?": "Gender bias refers to unequal representation or treatment based on gender. In radiology, this may lead to misdiagnoses if models are trained on unbalanced data.",
+    "how does gender bias affect radiology?": "Bias in radiology can result in inaccurate disease detection and disparities in treatment recommendations.",
+    "what are common mitigation techniques?": "Common techniques include threshold adjustment, reweighing, adversarial debiasing, and post-processing calibration.",
+    "which papers are cited?": (
+        "Key papers include:\n"
+        "- [Mehrabi et al. (2021): A Survey on Bias and Fairness in Machine Learning](https://arxiv.org/abs/1908.09635)\n"
+        "- [Obermeyer et al. (2019): Dissecting Racial Bias in an Algorithm Used to Manage the Health of Populations](https://www.science.org/doi/10.1126/science.aax2342)\n"
+        "- [Larrazabal et al. (2020): Gender Imbalance in Medical Imaging Datasets Produces Biased AI Algorithms](https://www.nature.com/articles/s41467-020-19109-9)"
+    ),
+    "how can i improve model fairness?": "Improving fairness can involve collecting more diverse data, applying bias mitigation techniques, and continuously monitoring performance across subgroups.",
+    "default": "I'm sorry, I don't have an answer for that. Please ask another question related to gender bias in radiology."
+}
+
+def static_chatbot(user_input):
+    user_input = user_input.lower().strip()
+    for key in PREDEFINED_ANSWERS:
+        if key in user_input:
+            return PREDEFINED_ANSWERS[key]
+    return PREDEFINED_ANSWERS["default"]
+
 # ========== MODULAR PAGE FUNCTIONS ==========
 
 def home_page():
@@ -142,11 +149,11 @@ def home_page():
         **Why Gender Bias Matters in AI:**
 
         - **Ethical Concerns:** Biased data can lead to unfair treatment.
-        - **Clinical Impact:** In healthcare, bias might cause misdiagnosis.
-        - **Regulatory Pressure:** Fairness is becoming a legal necessity.
-        - **Research Evidence:** Studies consistently show that underrepresented groups are adversely affected.
+        - **Clinical Impact:** Bias might cause misdiagnoses.
+        - **Regulatory Pressure:** Fairness is increasingly mandated.
+        - **Research Evidence:** Underrepresented groups are adversely affected.
 
-        Use the sidebar to explore data, model predictions, bias analysis, mitigation strategies, and test mitigation techniques.
+        Use the sidebar to explore data, run predictions, analyze bias, test mitigation strategies, and view posters.
         """
     )
     st.info("Navigate the app using the sidebar.")
@@ -176,19 +183,16 @@ def explore_data_page():
     st.title("📊 Explore Data & Prepare")
     df = st.session_state.df
     if df is not None:
-        # --- Column Selection (as in the original code) ---
         st.subheader("Select Columns")
         gender_col = st.selectbox("🛑 Select Gender Column:", df.columns, help="Select the column that indicates gender.")
         disease_col = st.selectbox("🩺 Select Disease Column:", df.columns, help="Select the column that shows disease status.")
         image_id_col = st.selectbox("🖼️ Select Image ID Column:", df.columns, help="Select the column that uniquely identifies images.")
-        # Standardize labels
         df[gender_col] = df[gender_col].apply(unify_gender_label)
         df[disease_col] = df[disease_col].apply(unify_disease_label)
         st.session_state.gender_col = gender_col
         st.session_state.disease_col = disease_col
         st.session_state.image_id_col = image_id_col
 
-        # --- Additional EDA ---
         st.subheader("Data Summary")
         st.write(df.describe(include="all"))
 
@@ -209,15 +213,17 @@ def explore_data_page():
 
 def model_prediction_page():
     st.title("🤖 Model Prediction")
-    df = st.session_state.df
-    if df is None:
-        st.info("No data available. You can still upload images.")
-    # Removed strict check on column selections so user can proceed
+    st.markdown("Select an AI model and upload chest X‑ray images to generate predictions.")
+    model_choice = st.selectbox(
+        "Select AI Model:",
+        ["CheXNet", "CheXagent"],
+        help="Choose the AI model to use for chest X‑ray prediction."
+    )
     uploaded_images = st.file_uploader(
         "Upload X-Ray Images",
         type=["png", "jpg", "jpeg"],
         accept_multiple_files=True,
-        help="Upload one or more X-Ray images for prediction."
+        help="Upload one or more X‑ray images for prediction."
     )
     threshold = st.slider(
         "Decision Threshold for 'Disease' classification",
@@ -229,14 +235,24 @@ def model_prediction_page():
         total_images = len(uploaded_images)
         for i, img in enumerate(uploaded_images, start=1):
             st.write(f"Processing Image {i}/{total_images}")
-            st.image(img, caption=f"Uploaded X-Ray: {img.name}", width=300)
+            st.image(img, caption=f"Uploaded X‑ray: {img.name}", width=300)
             try:
                 image = Image.open(img).convert("RGB")
-                tensor_img = preprocess_image(image).to(device)
-                with torch.no_grad():
-                    logits = model(tensor_img)
-                    probs = F.softmax(logits, dim=1)
-                    disease_prob = probs[0, 1].item()
+                tensor_img = preprocess_image(image)
+                if model_choice == "CheXNet":
+                    tensor_img = tensor_img.to(device)
+                    with torch.no_grad():
+                        logits = chexnet_model(tensor_img)
+                        probs = F.softmax(logits, dim=1)
+                        disease_prob = probs[0, 1].item()
+                        predicted_label = 1 if disease_prob >= threshold else 0
+                elif model_choice == "CheXagent":
+                    # Use Hugging Face pipeline for image classification with CheXagent model
+                    chexagent_pipe = pipeline("image-classification", model="StanfordAIMI/CheXagent-2-3b", trust_remote_code=True)
+                    # The pipeline returns a list of dicts with keys "label" and "score"
+                    result = chexagent_pipe(image)
+                    # Interpret the result: if label indicates "Disease" then use score; adjust as needed
+                    disease_prob = result[0]["score"]
                     predicted_label = 1 if disease_prob >= threshold else 0
                 new_row = {
                     "Image_ID": img.name,
@@ -268,7 +284,6 @@ def gender_bias_analysis_page():
         if gender_col is None or disease_col is None or image_id_col is None:
             st.warning("Column selections not set. Using available prediction data.")
         else:
-            # Merge gender information from original data if possible
             if "Unknown" in df_results["Gender"].values:
                 df_merged_gender = pd.merge(
                     df_results,
@@ -426,14 +441,17 @@ def importance_gender_bias_page():
         **Addressing Gender Bias in AI is Crucial:**
 
         - **Ethical Imperative:** Fair treatment in AI is a moral obligation.
-        - **Clinical Impact:** Biased models can lead to misdiagnosis or suboptimal care.
+        - **Clinical Impact:** Biased models can lead to misdiagnoses or suboptimal care.
         - **Regulatory Requirements:** Fairness is increasingly mandated.
         - **Research Evidence:** Underrepresentation leads to poorer outcomes for affected groups.
-
-        **Key References:**
-        - Mehrabi et al. (2021). *A Survey on Bias and Fairness in Machine Learning.*
-        - Obermeyer et al. (2019). *Dissecting Racial Bias in an Algorithm Used to Manage the Health of Populations.*
-        - Larrazabal et al. (2020). *Gender Imbalance in Medical Imaging Datasets Produces Biased AI Algorithms.*
+        """
+    )
+    st.markdown("### References")
+    st.markdown(
+        """
+        - [Mehrabi et al. (2021): A Survey on Bias and Fairness in Machine Learning](https://arxiv.org/abs/1908.09635)
+        - [Obermeyer et al. (2019): Dissecting Racial Bias in an Algorithm Used to Manage the Health of Populations](https://www.science.org/doi/10.1126/science.aax2342)
+        - [Larrazabal et al. (2020): Gender Imbalance in Medical Imaging Datasets Produces Biased AI Algorithms](https://www.nature.com/articles/s41467-020-19109-9)
         """
     )
 
@@ -451,40 +469,66 @@ def about_chexnet_model_page():
         """
     )
 
+def about_chexagent_page():
+    st.title("🧠 About CheXagent")
+    st.markdown(
+        """
+        **CheXagent** is a chest X‑ray analysis model provided by Stanford AIMI on Hugging Face.
+
+        - **Model Identifier:** StanfordAIMI/CheXagent-2-3b
+        - **Description:** A lightweight model designed for rapid chest X‑ray analysis.
+        - **Usage:** Integrated via the Transformers library using an image-classification pipeline.
+        - **Key Features:** Optimized for fast inference on image data; useful for comparing predictions against larger models.
+        - **Repository:** Visit the [Hugging Face model page](https://huggingface.co/StanfordAIMI/CheXagent-2-3b) for more details.
+        """
+    )
+
 def meet_the_team_page():
     st.title("👥 Meet the Team")
     team_members = [
-        {"name": "Alice", "role": "Lead Data Scientist", "image": "https://via.placeholder.com/150"},
-        {"name": "Bob", "role": "ML Engineer", "image": "https://via.placeholder.com/150"},
-        {"name": "Charlie", "role": "UX Designer", "image": "https://via.placeholder.com/150"},
-        {"name": "Diana", "role": "AI Ethics & Fairness Specialist", "image": "https://via.placeholder.com/150"}
+        {"name": "Yuying", "role": "Data Scientist"},
+        {"name": "Siwen", "role": "ML Engineer"},
+        {"name": "Zhi", "role": "Research Analyst"},
+        {"name": "Maude", "role": "UX Designer"}
     ]
     cols = st.columns(len(team_members))
     for i, member in enumerate(team_members):
         with cols[i]:
-            st.image(member["image"], width=150)
+            st.image("https://via.placeholder.com/150", width=150)
             st.write(f"**{member['name']}**")
             st.write(f"*{member['role']}*")
 
 def chatbot_page():
-    st.title("💬 AI Chatbot Helper")
-    st.markdown("Ask questions about the analysis below. The chatbot will help you understand key aspects such as bias, model behavior, thresholds, and mitigation techniques using OpenAI.")
+    st.title("💬 Chatbot")
+    st.markdown("Ask questions about gender bias in radiology. This chatbot uses predefined answers.")
     if "chat_history" not in st.session_state:
          st.session_state.chat_history = []
     with st.form("chat_form", clear_on_submit=True):
          user_message = st.text_input(
              "Your question:",
              key="chat_message",
-             help="Type a question (e.g., 'How does threshold adjustment mitigate bias?')"
+             help="Type a question (e.g., 'What is gender bias?' or 'How does bias affect radiology?')"
          )
          submitted = st.form_submit_button("Send")
          if submitted and user_message:
-             response = openai_chatbot(user_message)
+             response = static_chatbot(user_message)
              st.session_state.chat_history.append(("You", user_message))
              st.session_state.chat_history.append(("Chatbot", response))
     st.markdown("### Conversation")
     for speaker, message in st.session_state.chat_history:
          st.markdown(f"**{speaker}:** {message}")
+
+def posters_page():
+    st.title("🖼️ Posters")
+    st.markdown("Below are the posters for our project:")
+    poster_files = ["1.png", "2.png", "3.png", "4.png", "5.png"]
+    cols = st.columns(3)
+    for i, poster in enumerate(poster_files):
+        with cols[i % 3]:
+            try:
+                st.image(poster, caption=f"Poster {i+1}", use_column_width=True)
+            except Exception as e:
+                st.error(f"Error loading poster {poster}: {e}")
 
 # ========== SIDEBAR NAVIGATION ==========
 page_options = [
@@ -495,9 +539,11 @@ page_options = [
     "⚖️ Gender Bias Analysis",
     "🛠️ Bias Mitigation & Simulation",
     "🧪 Gender Bias Testing",
-    "💬 AI Chatbot",
+    "💬 Chatbot",
+    "🖼️ Posters",
     "📚 The Importance of Gender Bias",
     "🧠 About CheXNet Model",
+    "🧠 About CheXagent",
     "👥 Meet the Team"
 ]
 
@@ -522,11 +568,15 @@ elif selected_page == "🛠️ Bias Mitigation & Simulation":
     bias_mitigation_simulation_page()
 elif selected_page == "🧪 Gender Bias Testing":
     gender_bias_testing_page()
-elif selected_page == "💬 AI Chatbot":
+elif selected_page == "💬 Chatbot":
     chatbot_page()
+elif selected_page == "🖼️ Posters":
+    posters_page()
 elif selected_page == "📚 The Importance of Gender Bias":
     importance_gender_bias_page()
 elif selected_page == "🧠 About CheXNet Model":
     about_chexnet_model_page()
+elif selected_page == "🧠 About CheXagent":
+    about_chexagent_page()
 elif selected_page == "👥 Meet the Team":
     meet_the_team_page()
