@@ -36,17 +36,18 @@ st.set_page_config(
 )
 
 def set_background():
+    # Lighter background gradient
     st.markdown(
         """
         <style>
         .stApp {
-            background: linear-gradient(to bottom right, #2C3E50, #4CA1AF);
-            color: white;
+            background: linear-gradient(to bottom right, #ffffff, #e6f7ff);
+            color: #333;
         }
         .stTitle {
             font-size: 36px !important;
             font-weight: bold;
-            color: white !important;
+            color: #333 !important;
         }
         </style>
         """,
@@ -172,68 +173,46 @@ def upload_data_page():
         st.info("Please upload a CSV or XLSX file to continue.")
 
 def explore_data_page():
-    st.title("📊 Explore Data")
+    st.title("📊 Explore Data & Prepare")
     df = st.session_state.df
     if df is not None:
-        st.markdown("### Data Summary")
+        # --- Column Selection (as in the original code) ---
+        st.subheader("Select Columns")
+        gender_col = st.selectbox("🛑 Select Gender Column:", df.columns, help="Select the column that indicates gender.")
+        disease_col = st.selectbox("🩺 Select Disease Column:", df.columns, help="Select the column that shows disease status.")
+        image_id_col = st.selectbox("🖼️ Select Image ID Column:", df.columns, help="Select the column that uniquely identifies images.")
+        # Standardize labels
+        df[gender_col] = df[gender_col].apply(unify_gender_label)
+        df[disease_col] = df[disease_col].apply(unify_disease_label)
+        st.session_state.gender_col = gender_col
+        st.session_state.disease_col = disease_col
+        st.session_state.image_id_col = image_id_col
+
+        # --- Additional EDA ---
+        st.subheader("Data Summary")
         st.write(df.describe(include="all"))
 
-        # Let user select columns for more detailed analysis.
-        col_select = st.multiselect(
-            "Select columns for detailed analysis",
-            options=df.columns.tolist(),
-            help="Choose one or more columns to visualize distributions and relationships."
-        )
-        if col_select:
-            st.markdown("#### Column Distributions")
-            for col in col_select:
-                fig, ax = plt.subplots()
-                if pd.api.types.is_numeric_dtype(df[col]):
-                    ax.hist(df[col].dropna(), bins=20, color="#4facfe", edgecolor="black")
-                    ax.set_title(f"Distribution of {col}")
-                else:
-                    counts = df[col].value_counts()
-                    ax.bar(counts.index.astype(str), counts.values, color="#00f2fe", edgecolor="black")
-                    ax.set_title(f"Counts of {col}")
-                    plt.xticks(rotation=45)
-                st.pyplot(fig)
-        else:
-            st.info("Select one or more columns to visualize.")
-
-        # Additional interactive visualization: scatter plot for numeric columns.
-        numeric_cols = df.select_dtypes(include=["float", "int"]).columns.tolist()
-        if len(numeric_cols) >= 2:
-            st.markdown("### Interactive Scatter Plot")
-            x_axis = st.selectbox(
-                "Select X-axis",
-                options=numeric_cols,
-                help="Choose a numeric column for the x-axis."
-            )
-            y_axis = st.selectbox(
-                "Select Y-axis",
-                options=numeric_cols,
-                help="Choose a numeric column for the y-axis."
-            )
-            fig_scatter = px.scatter(
-                df, x=x_axis, y=y_axis,
-                title=f"Scatter Plot: {x_axis} vs {y_axis}",
-                hover_data=df.columns
-            )
-            st.plotly_chart(fig_scatter)
-        else:
-            st.info("Not enough numeric columns for a scatter plot.")
+        st.markdown("#### Column Distributions")
+        for col in df.columns:
+            fig, ax = plt.subplots()
+            if pd.api.types.is_numeric_dtype(df[col]):
+                ax.hist(df[col].dropna(), bins=20, color="#4facfe", edgecolor="black")
+                ax.set_title(f"Distribution of {col}")
+            else:
+                counts = df[col].value_counts()
+                ax.bar(counts.index.astype(str), counts.values, color="#00f2fe", edgecolor="black")
+                ax.set_title(f"Counts of {col}")
+                plt.xticks(rotation=45)
+            st.pyplot(fig)
     else:
-        st.info("Data not uploaded or not loaded correctly. Please go to the Upload Data page.")
+        st.info("No data uploaded yet. Please go to the Upload Data page.")
 
 def model_prediction_page():
     st.title("🤖 Model Prediction")
     df = st.session_state.df
     if df is None:
-        st.info("Please upload and explore data first.")
-        st.stop()
-    if "gender_col" not in st.session_state or "disease_col" not in st.session_state or "image_id_col" not in st.session_state:
-        st.info("Please complete data preparation in Explore Data.")
-        st.stop()
+        st.info("No data available. You can still upload images.")
+    # Removed strict check on column selections so user can proceed
     uploaded_images = st.file_uploader(
         "Upload X-Ray Images",
         type=["png", "jpg", "jpeg"],
@@ -281,37 +260,40 @@ def gender_bias_analysis_page():
     df = st.session_state.df
     df_results = st.session_state.df_results
     if df is None or df_results.empty:
-        st.info("Please complete data upload and model prediction first.")
-        st.stop()
-    gender_col = st.session_state.gender_col
-    disease_col = st.session_state.disease_col
-    image_id_col = st.session_state.image_id_col
-    # Merge gender information from the original data
-    if "Unknown" in df_results["Gender"].values:
-        df_merged_gender = pd.merge(
-            df_results,
-            df[[image_id_col, gender_col]],
-            how="left",
-            left_on="Image_ID",
-            right_on=image_id_col
-        )
-        df_merged_gender["Gender"] = df_merged_gender[gender_col].fillna("Unknown")
-        st.session_state.df_results = df_merged_gender[["Image_ID", "Gender", "Prediction", "Probability"]]
-    df_results = st.session_state.df_results
-    total_female = df_results[df_results["Gender"] == "F"].shape[0]
-    total_male = df_results[df_results["Gender"] == "M"].shape[0]
-    female_disease = df_results[(df_results["Gender"] == "F") & (df_results["Prediction"] == 1)].shape[0]
-    male_disease = df_results[(df_results["Gender"] == "M") & (df_results["Prediction"] == 1)].shape[0]
-    female_rate = female_disease / total_female if total_female > 0 else 0
-    male_rate = male_disease / total_male if total_male > 0 else 0
-    st.write(f"**Female Detection Rate:** {female_rate:.2%}  (F: {total_female} images)")
-    st.write(f"**Male Detection Rate:** {male_rate:.2%}  (M: {total_male} images)")
-    bias_difference = abs(female_rate - male_rate)
-    st.write(f"**Bias Difference (Female vs. Male):** {bias_difference:.4f}")
-    if bias_difference > 0.1:
-        st.warning("Significant bias detected toward one gender! Consider mitigating steps.")
+        st.info("No prediction data available yet.")
     else:
-        st.success("Bias difference is within acceptable limits.")
+        gender_col = st.session_state.get("gender_col", None)
+        disease_col = st.session_state.get("disease_col", None)
+        image_id_col = st.session_state.get("image_id_col", None)
+        if gender_col is None or disease_col is None or image_id_col is None:
+            st.warning("Column selections not set. Using available prediction data.")
+        else:
+            # Merge gender information from original data if possible
+            if "Unknown" in df_results["Gender"].values:
+                df_merged_gender = pd.merge(
+                    df_results,
+                    df[[image_id_col, gender_col]],
+                    how="left",
+                    left_on="Image_ID",
+                    right_on=image_id_col
+                )
+                df_merged_gender["Gender"] = df_merged_gender[gender_col].fillna("Unknown")
+                st.session_state.df_results = df_merged_gender[["Image_ID", "Gender", "Prediction", "Probability"]]
+                df_results = st.session_state.df_results
+        total_female = df_results[df_results["Gender"] == "F"].shape[0]
+        total_male = df_results[df_results["Gender"] == "M"].shape[0]
+        female_disease = df_results[(df_results["Gender"] == "F") & (df_results["Prediction"] == 1)].shape[0]
+        male_disease = df_results[(df_results["Gender"] == "M") & (df_results["Prediction"] == 1)].shape[0]
+        female_rate = female_disease / total_female if total_female > 0 else 0
+        male_rate = male_disease / total_male if total_male > 0 else 0
+        st.write(f"**Female Detection Rate:** {female_rate:.2%}  (F: {total_female} images)")
+        st.write(f"**Male Detection Rate:** {male_rate:.2%}  (M: {total_male} images)")
+        bias_difference = abs(female_rate - male_rate)
+        st.write(f"**Bias Difference (Female vs. Male):** {bias_difference:.4f}")
+        if bias_difference > 0.1:
+            st.warning("Significant bias detected toward one gender! Consider mitigating steps.")
+        else:
+            st.success("Bias difference is within acceptable limits.")
 
 def bias_mitigation_simulation_page():
     st.title("🛠️ Bias Mitigation & Simulation")
@@ -319,22 +301,18 @@ def bias_mitigation_simulation_page():
     df = st.session_state.df
     df_results = st.session_state.df_results
     if df is None or df_results.empty:
-        st.info("Please complete data upload and model prediction first.")
-        st.stop()
-    gender_col = st.session_state.gender_col
-    disease_col = st.session_state.disease_col
-    image_id_col = st.session_state.image_id_col
-    advanced_fairness = st.checkbox(
-        "Use advanced fairness approach with predictions",
-        help="Enable advanced fairness metrics computation."
-    )
-    if advanced_fairness:
-        if df is not None and image_id_col in df.columns:
+        st.info("No prediction data available yet.")
+    else:
+        advanced_fairness = st.checkbox(
+            "Use advanced fairness approach with predictions",
+            help="Enable advanced fairness metrics computation."
+        )
+        if advanced_fairness and df is not None:
             df_merged = pd.merge(
                 df,
                 df_results,
                 how="inner",
-                left_on=image_id_col,
+                left_on=st.session_state.get("image_id_col", "Image_ID"),
                 right_on="Image_ID"
             )
             adv_target_col = st.selectbox(
@@ -378,70 +356,68 @@ def bias_mitigation_simulation_page():
                     st.pyplot(fig_cm)
                 except Exception as e:
                     st.error(f"Error computing advanced metrics: {e}")
-    st.markdown("---")
-    st.markdown("### Possible Bias Mitigation Approaches")
-    st.markdown(
-        """
-        **1. Resampling/Upweighting**
-        Adjust training data distribution to reduce bias.
+        st.markdown("---")
+        st.markdown("### Possible Bias Mitigation Approaches")
+        st.markdown(
+            """
+            **1. Resampling/Upweighting**
+            Adjust training data distribution to reduce bias.
 
-        **2. Threshold Adjustment**
-        Use subgroup-specific thresholds to equalize metrics.
+            **2. Threshold Adjustment**
+            Use subgroup-specific thresholds to equalize metrics.
 
-        **3. Reweighing**
-        Weight samples to promote fair outcomes.
+            **3. Reweighing**
+            Weight samples to promote fair outcomes.
 
-        **4. Adversarial Debiasing**
-        Incorporate adversarial training to remove sensitive cues.
+            **4. Adversarial Debiasing**
+            Incorporate adversarial training to remove sensitive cues.
 
-        **5. Post-Processing**
-        Calibrate predictions after inference to correct bias.
-        """
-    )
-    st.success("Analysis & mitigation recommendations complete!")
+            **5. Post-Processing**
+            Calibrate predictions after inference to correct bias.
+            """
+        )
+        st.success("Analysis & mitigation recommendations complete!")
 
 def gender_bias_testing_page():
     st.title("🧪 Gender Bias Testing")
     st.markdown("### Test Bias Mitigation via Threshold Adjustment")
     df_results = st.session_state.df_results
     if df_results.empty:
-        st.info("No prediction data available. Please complete model prediction first.")
-        st.stop()
-    # Allow user to set separate thresholds for male and female
-    threshold_m = st.slider(
-        "Threshold for Male", 0.0, 1.0, 0.5, 0.01,
-        help="Set the decision threshold for male predictions."
-    )
-    threshold_f = st.slider(
-        "Threshold for Female", 0.0, 1.0, 0.5, 0.01,
-        help="Set the decision threshold for female predictions."
-    )
-    # Create adjusted predictions based on the new thresholds
-    df_new = df_results.copy()
-    def adjust_prediction(row):
-        if row["Gender"] == "M":
-            return 1 if row["Probability"] >= threshold_m else 0
-        elif row["Gender"] == "F":
-            return 1 if row["Probability"] >= threshold_f else 0
-        else:
-            return row["Prediction"]
-    df_new["Adjusted_Prediction"] = df_new.apply(adjust_prediction, axis=1)
-    total_female = df_new[df_new["Gender"] == "F"].shape[0]
-    total_male = df_new[df_new["Gender"] == "M"].shape[0]
-    female_disease = df_new[(df_new["Gender"] == "F") & (df_new["Adjusted_Prediction"] == 1)].shape[0]
-    male_disease = df_new[(df_new["Gender"] == "M") & (df_new["Adjusted_Prediction"] == 1)].shape[0]
-    female_rate = female_disease / total_female if total_female > 0 else 0
-    male_rate = male_disease / total_male if total_male > 0 else 0
-    st.write(f"**Adjusted Female Detection Rate:** {female_rate:.2%}  (F: {total_female} images)")
-    st.write(f"**Adjusted Male Detection Rate:** {male_rate:.2%}  (M: {total_male} images)")
-    bias_difference = abs(female_rate - male_rate)
-    st.write(f"**Adjusted Bias Difference (Female vs. Male):** {bias_difference:.4f}")
-    if bias_difference > 0.1:
-        st.warning("Significant bias detected even after threshold adjustment.")
+        st.info("No prediction data available. Please generate some predictions first.")
     else:
-        st.success("Bias difference is within acceptable limits after adjustment.")
-    st.markdown("#### Adjusted Predictions Preview")
-    st.dataframe(df_new.head())
+        threshold_m = st.slider(
+            "Threshold for Male", 0.0, 1.0, 0.5, 0.01,
+            help="Set the decision threshold for male predictions."
+        )
+        threshold_f = st.slider(
+            "Threshold for Female", 0.0, 1.0, 0.5, 0.01,
+            help="Set the decision threshold for female predictions."
+        )
+        df_new = df_results.copy()
+        def adjust_prediction(row):
+            if row["Gender"] == "M":
+                return 1 if row["Probability"] >= threshold_m else 0
+            elif row["Gender"] == "F":
+                return 1 if row["Probability"] >= threshold_f else 0
+            else:
+                return row["Prediction"]
+        df_new["Adjusted_Prediction"] = df_new.apply(adjust_prediction, axis=1)
+        total_female = df_new[df_new["Gender"] == "F"].shape[0]
+        total_male = df_new[df_new["Gender"] == "M"].shape[0]
+        female_disease = df_new[(df_new["Gender"] == "F") & (df_new["Adjusted_Prediction"] == 1)].shape[0]
+        male_disease = df_new[(df_new["Gender"] == "M") & (df_new["Adjusted_Prediction"] == 1)].shape[0]
+        female_rate = female_disease / total_female if total_female > 0 else 0
+        male_rate = male_disease / total_male if total_male > 0 else 0
+        st.write(f"**Adjusted Female Detection Rate:** {female_rate:.2%}  (F: {total_female} images)")
+        st.write(f"**Adjusted Male Detection Rate:** {male_rate:.2%}  (M: {total_male} images)")
+        bias_difference = abs(female_rate - male_rate)
+        st.write(f"**Adjusted Bias Difference (Female vs. Male):** {bias_difference:.4f}")
+        if bias_difference > 0.1:
+            st.warning("Significant bias detected even after threshold adjustment.")
+        else:
+            st.success("Bias difference is within acceptable limits after adjustment.")
+        st.markdown("#### Adjusted Predictions Preview")
+        st.dataframe(df_new.head())
 
 def importance_gender_bias_page():
     st.title("📚 The Importance of Gender Bias")
@@ -478,10 +454,10 @@ def about_chexnet_model_page():
 def meet_the_team_page():
     st.title("👥 Meet the Team")
     team_members = [
-        {"name": "Yuying", "role": "Lead Data Scientist", "image": "to come"},
-        {"name": "Siwen", "role": "ML Engineer", "image": "to come"},
-        {"name": "Zhi", "role": "UX Designer", "image": "to come"},
-        {"name": "Maude", "role": "AI Ethics & Fairness Specialist", "image": "to come"}
+        {"name": "Alice", "role": "Lead Data Scientist", "image": "https://via.placeholder.com/150"},
+        {"name": "Bob", "role": "ML Engineer", "image": "https://via.placeholder.com/150"},
+        {"name": "Charlie", "role": "UX Designer", "image": "https://via.placeholder.com/150"},
+        {"name": "Diana", "role": "AI Ethics & Fairness Specialist", "image": "https://via.placeholder.com/150"}
     ]
     cols = st.columns(len(team_members))
     for i, member in enumerate(team_members):
@@ -514,7 +490,7 @@ def chatbot_page():
 page_options = [
     "🏠 Home",
     "📂 Upload Data",
-    "📊 Explore Data",
+    "📊 Explore Data & Prepare",
     "🤖 Model Prediction",
     "⚖️ Gender Bias Analysis",
     "🛠️ Bias Mitigation & Simulation",
@@ -536,7 +512,7 @@ if selected_page == "🏠 Home":
     home_page()
 elif selected_page == "📂 Upload Data":
     upload_data_page()
-elif selected_page == "📊 Explore Data":
+elif selected_page == "📊 Explore Data & Prepare":
     explore_data_page()
 elif selected_page == "🤖 Model Prediction":
     model_prediction_page()
