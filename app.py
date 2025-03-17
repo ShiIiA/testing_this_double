@@ -208,7 +208,14 @@ def upload_data_page():
         st.info("Please upload a dataset to continue.")
 
 def explore_data_page():
-    """Display an interactive data exploration page using Altair for selected columns and Plotly for disease visualization."""
+    """
+    Display an interactive data exploration page.
+    - Users can select columns to visualize (using Altair charts).
+    - Users can choose which columns represent Disease and Gender.
+    - A pie chart shows gender repartition for a selected disease category.
+    - A pivot table is created that shows, for each disease, the counts for each gender.
+      Rows where only one gender is present are highlighted in yellow.
+    """
     st.title("📊 Explore Data & Prepare")
     df = st.session_state.df
     if df is not None:
@@ -218,7 +225,6 @@ def explore_data_page():
             for col in selected_cols:
                 st.markdown(f"### Visualization for **{col}**")
                 if pd.api.types.is_numeric_dtype(df[col]):
-                    # For numeric data, create a histogram with Altair.
                     chart = alt.Chart(df).mark_bar().encode(
                         alt.X(f"{col}:Q", bin=alt.Bin(maxbins=20), title=col),
                         alt.Y("count()", title="Count"),
@@ -230,7 +236,6 @@ def explore_data_page():
                     )
                     st.altair_chart(chart, use_container_width=True)
                 else:
-                    # For categorical data, create a bar chart of counts.
                     counts = df[col].value_counts().reset_index()
                     counts.columns = [col, 'Count']
                     chart = alt.Chart(counts).mark_bar().encode(
@@ -253,19 +258,43 @@ def explore_data_page():
 
         # ----------------- Disease and Gender Visualization -----------------
         st.markdown("### Disease and Gender Visualization")
-        # Let the user select which columns represent Disease and Gender
+        # Let the user choose which columns represent disease and gender
         disease_header = st.selectbox("Select Disease Column for Visualization:", df.columns.tolist())
         gender_header = st.selectbox("Select Gender Column for Visualization:", df.columns.tolist())
-        # Only proceed if both are selected (they will be non-empty since options come from df.columns)
         if disease_header and gender_header:
-            # Allow the user to select a disease category from the chosen disease column
+            # Pie Chart for a selected disease category
             selected_disease = st.selectbox("Select Disease Category:", options=sorted(df[disease_header].dropna().unique()))
-            # Filter the dataframe for the selected disease
             disease_df = df[df[disease_header] == selected_disease]
-            # Create a pie chart for gender distribution using Plotly Express
-            pie_chart = px.pie(disease_df, names=gender_header,
-                               title=f"Gender Distribution for {selected_disease}")
+            pie_chart = px.pie(disease_df, names=gender_header, title=f"Gender Distribution for {selected_disease}")
             st.plotly_chart(pie_chart, use_container_width=True)
+
+            # Create a pivot table: for each disease, count number of each gender
+            group_df = df.groupby([disease_header, gender_header]).size().reset_index(name="Count")
+            pivot_df = group_df.pivot(index=disease_header, columns=gender_header, values="Count").fillna(0).astype(int)
+            pivot_df["Total"] = pivot_df.sum(axis=1)
+
+            # Define a custom style function
+            def style_row(row):
+                # For each row, if one of the genders (F or M) is zero (and the other > 0), highlight the row in yellow.
+                styles = []
+                for col in row.index:
+                    if col == "F":
+                        if row[col] == 0 and row.get("M", 0) > 0:
+                            styles.append("background-color: yellow; font-weight: bold;")
+                        else:
+                            styles.append("background-color: #FF69B4; color: white;")
+                    elif col == "M":
+                        if row[col] == 0 and row.get("F", 0) > 0:
+                            styles.append("background-color: yellow; font-weight: bold;")
+                        else:
+                            styles.append("background-color: #1E90FF; color: white;")
+                    else:
+                        styles.append("")
+                return styles
+
+            st.markdown("### Disease & Gender Table")
+            pivot_styled = pivot_df.style.apply(style_row, axis=1)
+            st.dataframe(pivot_styled)
         else:
             st.info("Please select the appropriate Disease and Gender columns for visualization.")
     else:
