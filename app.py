@@ -464,7 +464,7 @@ def datathon_resources_page():
     )
 
 def project_overview_page():
-    st.title("📈 Project Overview & Impact")
+    st.title("📈 Project Overview")
     st.markdown(
         """
         **Project Objective:**
@@ -571,54 +571,6 @@ def live_metrics_dashboard_page():
             st.write(f"**Bias Difference:** {abs(rate_F - rate_M):.4f}")
         chart_data = df_results[["Prediction", "Probability"]]
         st.line_chart(chart_data)
-
-def explainable_analysis_page():
-    st.title("🔍 Explainable Analysis")
-    st.markdown("This page analyzes textual features related to false predictions to help understand potential bias.")
-    df = st.session_state.df
-    df_results = st.session_state.df_results
-    if df is None or df_results.empty:
-        st.info("No prediction data available.")
-        return
-    disease_col = st.session_state.get("disease_col", None)
-    image_id_col = st.session_state.get("image_id_col", None)
-    if disease_col is None or image_id_col is None:
-        st.info("Required column selections are missing.")
-        return
-    merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left", left_on="Image_ID", right_on=image_id_col)
-    merged = merged.rename(columns={disease_col: "True_Label"})
-    merged["Correct"] = merged.apply(lambda row: (row["Prediction"]==1 and row["True_Label"]!="No Disease") or (row["Prediction"]==0 and row["True_Label"]=="No Disease"), axis=1)
-    st.write("Merged Predictions with Ground Truth:")
-    st.dataframe(merged.head())
-    symptom_col = None
-    for col in df.columns:
-        if "symptom" in col.lower():
-            symptom_col = col
-            break
-    if symptom_col is None:
-        st.info("No 'Symptoms' column found for textual analysis.")
-        return
-    st.markdown("### Textual Analysis of Symptoms in False Predictions")
-    false_preds = merged[merged["Correct"]==False]
-    st.write(f"Number of false predictions: {false_preds.shape[0]}")
-    if false_preds.empty:
-        st.info("No false predictions to analyze.")
-        return
-    text_data = " ".join(false_preds[symptom_col].dropna().astype(str).tolist())
-    words = re.findall(r'\w+', text_data.lower())
-    word_counts = Counter(words)
-    common_words = word_counts.most_common(20)
-    st.markdown("#### Most Common Words in Symptoms (False Predictions)")
-    st.table(common_words)
-    try:
-        from wordcloud import WordCloud
-        wordcloud = WordCloud(width=800, height=400, background_color="white").generate(text_data)
-        plt.figure(figsize=(10,5))
-        plt.imshow(wordcloud, interpolation="bilinear")
-        plt.axis("off")
-        st.pyplot(plt)
-    except Exception as e:
-        st.info("WordCloud could not be generated.")
 
 # ========== SIDEBAR NAVIGATION ==========
 page_options = [
