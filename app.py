@@ -244,8 +244,10 @@ def explore_data_page():
                 pie_chart.update_traces(texttemplate='%{value}', textposition='inside')
                 st.plotly_chart(pie_chart, use_container_width=True)
 
-            # Create pivot table using pivot_table with aggfunc 'size'
-            pivot_df = pd.pivot_table(df, index=disease_header, columns=gender_header, aggfunc='size', fill_value=0)
+            # Add a slider to limit the sample size for pivot table creation.
+            sample_size = st.slider("Select number of rows for pivot table", min_value=100, max_value=len(df), value=min(1000, len(df)))
+            df_sample = df.head(sample_size)
+            pivot_df = pd.pivot_table(df_sample, index=disease_header, columns=gender_header, aggfunc='size', fill_value=0)
             for col in ["F", "M"]:
                 if col not in pivot_df.columns:
                     pivot_df[col] = 0
@@ -447,8 +449,7 @@ def explainable_analysis_page():
     if disease_col is None or image_id_col is None:
         st.info("Required column selections are missing.")
         return
-    merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left",
-                      left_on="Image_ID", right_on=image_id_col)
+    merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left", left_on="Image_ID", right_on=image_id_col)
     merged = merged.rename(columns={disease_col: "True_Label"})
     merged["Correct"] = merged.apply(lambda row: (row["Prediction"] == 1 and row["True_Label"] != "No Disease") or
                                                (row["Prediction"] == 0 and row["True_Label"] == "No Disease"), axis=1)
@@ -570,7 +571,7 @@ def chatbot_page():
 def posters_page():
     st.title("🖼️ Posters")
     st.markdown("Below are our project posters:")
-    poster_files = ["1.png", "4.png", "5.png"]
+    poster_files = ["1.png", "2.png", "3.png", "4.png", "5.png"]
     cols = st.columns(3)
     for i, poster in enumerate(poster_files):
         with cols[i % 3]:
