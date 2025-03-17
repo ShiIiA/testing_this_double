@@ -447,7 +447,8 @@ def explainable_analysis_page():
     if disease_col is None or image_id_col is None:
         st.info("Required column selections are missing.")
         return
-    merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left", left_on="Image_ID", right_on=image_id_col)
+    merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left",
+                      left_on="Image_ID", right_on=image_id_col)
     merged = merged.rename(columns={disease_col: "True_Label"})
     merged["Correct"] = merged.apply(lambda row: (row["Prediction"] == 1 and row["True_Label"] != "No Disease") or
                                                (row["Prediction"] == 0 and row["True_Label"] == "No Disease"), axis=1)
