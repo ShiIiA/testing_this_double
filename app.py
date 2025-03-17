@@ -212,10 +212,11 @@ def explore_data_page():
     Display an interactive data exploration page.
       - Users select columns for visualization using Altair.
       - Users choose which columns represent Disease, Gender, and (optionally) Age.
-      - A pie chart shows the gender repartition for a selected disease category.
+      - A pie chart shows the gender repartition (with pink for females, blue for males)
+        for a selected disease category.
       - A pivot table is created showing, for each disease, the counts per gender and,
         if an Age column is selected, the average, minimum, and maximum age.
-      - The pivot table styles the "F" column in pink and the "M" column in blue,
+      - The table styles the "F" column in pink and the "M" column in blue,
         and highlights rows in yellow when only one gender is present.
     """
     st.title("📊 Explore Data & Prepare")
@@ -264,15 +265,16 @@ def explore_data_page():
         gender_header = st.selectbox("Select Gender Column for Visualization:", df.columns.tolist())
         age_header = st.selectbox("Select Age Column (optional):", [None] + df.columns.tolist())
         if age_header:
-            # Ensure the selected age column is numeric.
             df[age_header] = pd.to_numeric(df[age_header], errors='coerce')
 
         if disease_header and gender_header:
-            # Pie Chart for a selected disease category
+            # Pie Chart for a selected disease category with custom colors
             selected_disease = st.selectbox("Select Disease Category:", options=sorted(df[disease_header].dropna().unique()))
             disease_df = df[df[disease_header] == selected_disease]
             pie_chart = px.pie(disease_df, names=gender_header,
-                               title=f"Gender Distribution for {selected_disease}")
+                               title=f"Gender Distribution for {selected_disease}",
+                               color=gender_header,
+                               color_discrete_map={"F": "pink", "M": "blue"})
             st.plotly_chart(pie_chart, use_container_width=True)
 
             # Create a pivot table: group by disease and gender, count entries.
@@ -283,12 +285,15 @@ def explore_data_page():
                 age_stats = df.groupby(disease_header)[age_header].agg(['mean', 'min', 'max']).rename(
                     columns={'mean': 'Avg Age', 'min': 'Min Age', 'max': 'Max Age'})
                 pivot_df = pivot_df.merge(age_stats, left_index=True, right_index=True, how="left")
+
             # Define a style function for the pivot table.
-            def style_pivot(row):
-                # If both gender columns exist, check if one count is 0 while the other is > 0.
-                if "F" in row.index and "M" in row.index:
-                    if (row["F"] == 0 and row["M"] > 0) or (row["M"] == 0 and row["F"] > 0):
-                        return ["background-color: yellow; font-weight: bold;" for _ in row]
+            def style_row(row):
+                # Determine if both genders are present
+                f_val = row.get("F", np.nan)
+                m_val = row.get("M", np.nan)
+                if (pd.notnull(f_val) and f_val == 0 and pd.notnull(m_val) and m_val > 0) or \
+                   (pd.notnull(m_val) and m_val == 0 and pd.notnull(f_val) and f_val > 0):
+                    return ["background-color: yellow; font-weight: bold;" for _ in row.index]
                 styled = []
                 for col in row.index:
                     if col == "F":
@@ -300,7 +305,7 @@ def explore_data_page():
                 return styled
 
             st.markdown("### Disease & Gender Table with Age Metrics")
-            pivot_styled = pivot_df.style.apply(style_pivot, axis=1)
+            pivot_styled = pivot_df.style.apply(style_row, axis=1)
             st.dataframe(pivot_styled)
         else:
             st.info("Please select the appropriate Disease and Gender columns for visualization.")
@@ -585,15 +590,18 @@ def meet_the_team_page():
     """Display team members with pictures using a tab layout."""
     st.title("👥 Meet the Team")
     team_members = [
-        {"name": "Yuying", "role": "Data Scientist", "image": "Yuying.webp"},
-        {"name": "Siwen", "role": "ML Engineer", "image": "Siwen.webp"},
-        {"name": "Zhi", "role": "Research Analyst", "image": "Zhi.webp"},
-        {"name": "Maude", "role": "UX Designer", "image": "Maude.webp"}
+        {"name": "Yuying", "role": "Data Scientist", "image": os.path.join("images", "Yuying.webp")},
+        {"name": "Siwen", "role": "ML Engineer", "image": os.path.join("images", "Siwen.webp")},
+        {"name": "Zhi", "role": "Research Analyst", "image": os.path.join("images", "Zhi.webp")},
+        {"name": "Maude", "role": "UX Designer", "image": os.path.join("images", "Maude.webp")}
     ]
     tabs = st.tabs([member["name"] for member in team_members])
     for tab, member in zip(tabs, team_members):
         with tab:
-            st.image(member["image"], width=150)
+            try:
+                st.image(member["image"], width=150)
+            except Exception as e:
+                st.error(f"Unable to load image for {member['name']}")
             st.write(f"**{member['name']}**")
             st.write(f"*{member['role']}*")
 
@@ -624,7 +632,9 @@ def posters_page():
     for i, poster in enumerate(poster_files):
         with cols[i % 3]:
             try:
-                st.image(poster, caption=f"Poster {i+1}", use_container_width=True)
+                # Assume posters are in an "images" folder
+                poster_path = os.path.join("images", poster)
+                st.image(poster_path, caption=f"Poster {i+1}", use_container_width=True)
             except Exception as e:
                 logging.error(f"Error loading poster {poster}", exc_info=True)
                 st.error(f"Error loading poster {poster}: {e}")
