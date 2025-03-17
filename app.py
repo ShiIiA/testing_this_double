@@ -226,7 +226,7 @@ def explore_data_page():
         if disease_header and gender_header:
             selected_disease = st.selectbox("Select Disease Category:", options=sorted(df[disease_header].dropna().unique()))
             filtered_df = df[df[disease_header] == selected_disease]
-            # Pre-aggregate gender counts for pie chart.
+            # Pre-aggregate gender counts for the pie chart.
             gender_counts = filtered_df[gender_header].value_counts().reset_index()
             gender_counts.columns = [gender_header, "Count"]
             pie_chart = px.pie(
@@ -236,15 +236,14 @@ def explore_data_page():
                 title=f"Gender Distribution for {selected_disease}",
                 color=gender_header,
                 color_discrete_map={"F": "pink", "M": "blue"},
-                hover_data={"Count": True}
+                hover_data=["Count"]
             )
-            # Update the pie chart to show the raw count in the slice text.
+            # Show raw count inside slices.
             pie_chart.update_traces(texttemplate='%{value}', textposition='inside')
             st.plotly_chart(pie_chart, use_container_width=True)
 
-            # Create a pivot table using pivot_table (avoids reset_index conflicts)
+            # Create pivot table using pivot_table (aggfunc 'size')
             pivot_df = pd.pivot_table(df, index=disease_header, columns=gender_header, aggfunc='size', fill_value=0)
-            # Ensure both "F" and "M" exist.
             for col in ["F", "M"]:
                 if col not in pivot_df.columns:
                     pivot_df[col] = 0
@@ -256,7 +255,6 @@ def explore_data_page():
                     columns={'mean': 'Avg Age', 'min': 'Min Age', 'max': 'Max Age'})
                 pivot_df = pivot_df.merge(age_stats, left_index=True, right_index=True, how="left")
 
-            # Style only the individual cells for "F" and "M"
             def style_row(row):
                 styles = []
                 for col in row.index:
@@ -269,7 +267,6 @@ def explore_data_page():
                 return styles
 
             st.markdown("### Disease & Gender Table with Age Metrics")
-            # If the pivot table is too large to style, display unstyled.
             if pivot_df.size > 262144:
                 st.write("Pivot table too large to style. Displaying unstyled table:")
                 st.dataframe(pivot_df)
@@ -448,7 +445,8 @@ def explainable_analysis_page():
     if disease_col is None or image_id_col is None:
         st.info("Required column selections are missing.")
         return
-    merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left", left_on="Image_ID", right_on=image_id_col)
+    merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left",
+                      left_on="Image_ID", right_on=image_id_col)
     merged = merged.rename(columns={disease_col: "True_Label"})
     merged["Correct"] = merged.apply(lambda row: (row["Prediction"] == 1 and row["True_Label"] != "No Disease") or
                                                (row["Prediction"] == 0 and row["True_Label"] == "No Disease"), axis=1)
@@ -570,7 +568,7 @@ def chatbot_page():
 def posters_page():
     st.title("🖼️ Posters")
     st.markdown("Below are our project posters:")
-    poster_files = ["1.png", "2.png", "3.png", "4.png", "5.png"]
+    poster_files = ["1.png", "4.png", "5.png"]
     cols = st.columns(3)
     for i, poster in enumerate(poster_files):
         with cols[i % 3]:
