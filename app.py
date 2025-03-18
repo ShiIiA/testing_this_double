@@ -60,7 +60,7 @@ if uploaded_file:
         st.session_state.gender_col = st.selectbox("Select Gender Column", df.columns.tolist())
         st.session_state.disease_col = st.selectbox("Select Disease Column", df.columns.tolist())
 
-        # Convert all disease column values to string to avoid type errors
+        # Convert disease column values to string to avoid type errors
         df[st.session_state.disease_col] = df[st.session_state.disease_col].astype(str)
 
         # Extract unique disease values dynamically
@@ -72,26 +72,23 @@ if uploaded_file:
         else:
             st.success(f"✅ Detected {len(disease_classes)} diseases: {', '.join(st.session_state.disease_classes)}")
 
+            # Load model after detecting disease classes
+            num_classes = len(st.session_state.disease_classes)
+
+            # Load DenseNet121 model dynamically
+            st.session_state.chexnet_model = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
+            st.session_state.chexnet_model.classifier = nn.Linear(1024, num_classes)  # Adjust output layer
+            st.session_state.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            st.session_state.chexnet_model = st.session_state.chexnet_model.to(st.session_state.device)
+            st.session_state.chexnet_model.eval()
+
+            # Mark model as loaded
+            st.session_state.model_loaded = True
+            st.success("✅ Model Loaded Successfully!")
+
     except Exception as e:
         logging.error("Error loading file", exc_info=True)
         st.error(f"🚨 Error loading file: {e}")
-
-# ------------------------- LOAD CHEXNET MODEL -------------------------
-@st.cache_resource(show_spinner=True)
-def load_chexnet_model(num_classes):
-    model = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
-    model.classifier = nn.Linear(1024, num_classes)  # Dynamically adjust output size
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    model.eval()
-    return model, device
-
-if st.session_state.disease_classes:
-    num_classes = len(st.session_state.disease_classes)
-    if not st.session_state.model_loaded:
-        st.session_state.chexnet_model, st.session_state.device = load_chexnet_model(num_classes)
-        st.session_state.model_loaded = True
-        st.success("✅ Model Loaded Successfully!")
 
 # ------------------------- PREPROCESS IMAGE -------------------------
 def preprocess_image(image):
@@ -103,12 +100,8 @@ def preprocess_image(image):
 
 # ------------------------- MODEL PREDICTION -------------------------
 def predict_disease(image):
-    if not st.session_state.disease_classes:
-        st.error("❌ No diseases detected from dataset. Please upload a dataset with disease labels.")
-        return None, None
-
-    if not st.session_state.chexnet_model:
-        st.error("❌ Model is not loaded yet.")
+    if not st.session_state.model_loaded or st.session_state.chexnet_model is None:
+        st.error("❌ Model is not loaded yet. Please upload a dataset and select disease labels first.")
         return None, None
 
     tensor_img = preprocess_image(image).to(st.session_state.device)
@@ -128,45 +121,18 @@ st.title("🖼️ Predict Diseases from X-ray Images")
 uploaded_images = st.file_uploader("Upload X-ray Images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
 if uploaded_images:
-    for img in uploaded_images:
-        st.image(img, caption=f"Uploaded: {img.name}", width=300)
+    if not st.session_state.model_loaded:
+        st.warning("⚠️ Model not loaded yet. Please upload a dataset and select disease labels.")
+    else:
+        for img in uploaded_images:
+            st.image(img, caption=f"Uploaded: {img.name}", width=300)
 
-        # Perform prediction
-        image = Image.open(img).convert("RGB")
-        pred_disease, confidence = predict_disease(image)
+            # Perform prediction
+            image = Image.open(img).convert("RGB")
+            pred_disease, confidence = predict_disease(image)
 
-        if pred_disease:
-            st.success(f"🦠 **Predicted Disease(s):** {pred_disease} | **Confidence:** {confidence:.2%}")
-
-# ------------------------- EXPLORATORY DATA ANALYSIS -------------------------
-if st.session_state.df is not None:
-    st.title("📊 Explore Data & Visualizations")
-
-    # Disease Frequency Visualization
-    disease_counts = st.session_state.df[st.session_state.disease_col].value_counts()
-    st.bar_chart(disease_counts)
-
-    # Display missing values
-    st.write("### Missing Values")
-    st.dataframe(st.session_state.df.isnull().sum())
-
-# ------------------------- BIAS DETECTION -------------------------
-st.title("⚖️ Gender Bias Analysis")
-if st.session_state.df is not None:
-    gender_col = st.session_state.gender_col
-    disease_col = st.session_state.disease_col
-
-    if gender_col and disease_col:
-        # Compute Bias Metrics
-        df_filtered = st.session_state.df[[gender_col, disease_col]].dropna()
-        bias_summary = df_filtered.groupby(gender_col)[disease_col].value_counts(normalize=True).reset_index(name="Proportion")
-        st.write("### Bias Analysis Results")
-        st.dataframe(bias_summary)
-
-        # Visualizing Gender Bias
-        import plotly.express as px
-        bias_chart = px.bar(bias_summary, x=gender_col, y="Proportion", color=disease_col, title="Gender Bias in Disease Predictions")
-        st.plotly_chart(bias_chart)
+            if pred_disease:
+                st.success(f"🦠 **Predicted Disease(s):** {pred_disease} | **Confidence:** {confidence:.2%}")
 
 # ------------------------- END OF APP -------------------------
 st.success("🎯 **App Ready!** Upload a dataset, make predictions, and analyze bias.")
