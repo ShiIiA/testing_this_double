@@ -156,17 +156,46 @@ def load_model(model_name):
 
                 st.session_state.models_loaded[model_name] = model
                 st.success(f"✅ {model_name} loaded successfully!")
+
+                # Display model structure summary
+                st.write(f"Model structure: {model_name}")
                 return model
 
             # Load pre-trained model from TorchXRayVision
             elif model_info["source"] == "torchxrayvision":
-                model = xrv.models.DenseNet(weights=model_info["name"])
-                model = model.to(st.session_state.device)
-                model.eval()
+                try:
+                    # Explicitly print available weights for debugging
+                    st.write(f"Loading TorchXRayVision model with weights: {model_info['name']}")
 
-                st.session_state.models_loaded[model_name] = model
-                st.success(f"✅ {model_name} loaded successfully!")
-                return model
+                    # Make sure we're using all defaults for TorchXRayVision models
+                    model = xrv.models.DenseNet(weights=model_info["name"])
+                    model = model.to(st.session_state.device)
+                    model.eval()
+
+                    # Print model pathologies
+                    st.write(f"Model targets the following pathologies: {xrv.datasets.default_pathologies}")
+
+                    st.session_state.models_loaded[model_name] = model
+                    st.success(f"✅ {model_name} loaded successfully!")
+                    return model
+                except Exception as e:
+                    st.error(f"Failed to load {model_name} from TorchXRayVision: {e}")
+                    st.info("Attempting fallback method...")
+
+                    # Try alternative loading method
+                    if model_info["name"] == "densenet121-res224-chex":
+                        model = xrv.models.DenseNet(weights="densenet121-res224-chex")
+                    elif model_info["name"] == "densenet121-res224-mimic_nb":
+                        model = xrv.models.DenseNet(weights="densenet121-res224-mimic_nb")
+                    else:
+                        model = xrv.models.DenseNet(weights="densenet121-res224-all")
+
+                    model = model.to(st.session_state.device)
+                    model.eval()
+
+                    st.session_state.models_loaded[model_name] = model
+                    st.success(f"✅ {model_name} loaded with fallback method!")
+                    return model
 
     except Exception as e:
         logging.error(f"Error loading {model_name} model", exc_info=True)
@@ -247,8 +276,40 @@ def predict_disease(image, model_name, threshold=0.5):
             outputs = model(tensor_img)
             probs = torch.sigmoid(outputs)
 
-            # Use predefined label names
+            # Get all probabilities above threshold
             label_names = xrv.datasets.default_pathologies
+            detected_diseases = []
+            max_prob = 0
+            max_idx = -1
+
+            # Log all probabilities for debugging
+            for i, (name, prob) in enumerate(zip(label_names, probs[0])):
+                prob_val = prob.item()
+                if prob_val > max_prob:
+                    max_prob = prob_val
+                    max_idx = i
+                if prob_val >= threshold:
+                    detected_diseases.append((name, prob_val))
+
+            # If too many diseases are detected, increase the threshold adaptively
+            adaptive_threshold = threshold
+            while len(detected_diseases) > 3 and adaptive_threshold < 0.9:
+                adaptive_threshold += 0.1
+                detected_diseases = [(name, prob) for name, prob in detected_diseases if prob >= adaptive_threshold]
+
+            # Choose the highest probability disease, or "No Disease" if none above threshold
+            if detected_diseases:
+                # Sort by probability (highest first)
+                detected_diseases.sort(key=lambda x: x[1], reverse=True)
+                predicted_label, max_prob_val = detected_diseases[0]
+            else:
+                if max_idx >= 0:
+                    # Debug logging - even if below threshold, what's the highest?
+                    predicted_label = "No Disease"
+                    max_prob_val = max_prob
+                else:
+                    predicted_label = "No Disease"
+                    max_prob_val = 0.0
         else:
             # Standard models
             outputs = model(tensor_img)
@@ -260,14 +321,18 @@ def predict_disease(image, model_name, threshold=0.5):
             else:
                 label_names = [f"Disease_{i}" for i in range(probs.shape[1])]
 
-        # Get highest probability
-        max_prob, max_idx = torch.max(probs[0], dim=0)
-        max_prob_val = max_prob.item()
+            # Log all probabilities for debugging
+            all_probs = [(label, prob.item()) for label, prob in zip(label_names, probs[0])]
+            st.write("All probabilities:", all_probs)
 
-        if max_prob_val >= threshold:
-            predicted_label = label_names[max_idx]
-        else:
-            predicted_label = "No Disease"
+            # Get highest probability
+            max_prob, max_idx = torch.max(probs[0], dim=0)
+            max_prob_val = max_prob.item()
+
+            if max_prob_val >= threshold:
+                predicted_label = label_names[max_idx]
+            else:
+                predicted_label = "No Disease"
 
         return predicted_label, max_prob_val
 
