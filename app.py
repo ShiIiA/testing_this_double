@@ -245,18 +245,21 @@ def preprocess_image(image, model_name):
 
     # Different preprocessing depending on model source
     if model_name in MODELS and MODELS[model_name]["source"] == "torchxrayvision":
+        # Use TorchXRayVision's preprocessing
+        # Resize to 224x224 first using PIL
+        image = image.resize((224, 224), Image.LANCZOS)
+
         # Convert PIL image to numpy array with float32 dtype
         img_np = np.array(image).astype(np.float32)
 
-        # IMPORTANT: Do NOT pre-normalize before calling xrv.datasets.normalize
         # Pass the maxval parameter (255 for 8-bit images) directly to normalize
-        img = xrv.datasets.normalize(img_np, maxval=255)
+        # but don't let it reshape - we'll handle that manually
+        img = xrv.datasets.normalize(img_np, maxval=255, reshape=False)
 
-        # Ensure proper dimensions: [batch, channels, height, width]
-        if img.shape != (-1, 1, 224, 224):
-            # The normalize function should have reshaped, but double-check
-            img = img.reshape(1, 1, 224, 224)
+        # Manually reshape to match expected dimensions
+        img = img.reshape(1, 1, 224, 224)
 
+        # Convert to tensor
         tensor_img = torch.from_numpy(img)
     else:
         # Standard preprocessing for PyTorch models
