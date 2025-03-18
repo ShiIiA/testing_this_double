@@ -611,15 +611,123 @@ def explore_data_page():
         st.info("No data uploaded. Please use the Upload Data page.")
 
 def model_prediction_page():
-    # ... (previous code)
+    st.title("🤖 Model Prediction")
+    st.markdown("Select an AI model and upload chest X-ray images for prediction.")
+
+    if st.session_state.df is None:
+        st.warning("⚠️ Please upload and process a dataset before making predictions.")
+        return
+
+    if not st.session_state.disease_classes:
+        st.warning("⚠️ No disease classes detected. Please ensure you've selected the correct disease column.")
+        return
+
+    # Check if any models are loaded
+    if not st.session_state.models_loaded:
+        st.warning("⚠️ No models are loaded. Please go to the Home page and load at least one model.")
+        return
+
+    # Model selection
+    model_choice = st.selectbox(
+        "Select AI Model:",
+        list(st.session_state.models_loaded.keys()),
+        help="Choose the model to use for prediction."
+    )
+
+    # Decision threshold
+    threshold = st.slider(
+        "Decision Threshold",
+        0.0, 1.0, 0.5, 0.01,
+        help="Adjust the threshold for positive disease classification."
+    )
+
+    # Upload images
+    uploaded_images = st.file_uploader(
+        "Upload X-ray Images",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        help="Upload one or more chest X-ray images for analysis."
+    )
+
+    if uploaded_images:
+        with st.spinner("Processing images..."):
+            progress_bar = st.progress(0)
+            total_images = len(uploaded_images)
+            results = []
+
+            for i, img in enumerate(uploaded_images, start=1):
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.write(f"Processing Image {i}/{total_images}")
+                    st.image(img, caption=f"Uploaded: {img.name}", width=300)
+
+                with col2:
+                    try:
+                        # Process image
+                        image = Image.open(img).convert("L")  # Convert to grayscale explicitly
+                        predicted_label, confidence = predict_disease(image, model_choice, threshold)
+
+                        # Try to find the actual label and gender in the dataset
+                        image_id = os.path.splitext(img.name)[0]
+                        df = st.session_state.df
+                        id_col = st.session_state.image_id_col
+
+                        # Find the image in the dataset
+                        matches = df[df[id_col].astype(str).str.contains(image_id, case=False, na=False)]
+
+                        if not matches.empty:
+                            # Get actual disease and gender
+                            actual_disease = matches.iloc[0][st.session_state.disease_col]
+                            gender = matches.iloc[0][st.session_state.gender_col]
+                        else:
+                            actual_disease = "Unknown"
+                            gender = "Unknown"
+
+                        # Add result to our tracking dataframe
+                        new_row = {
+                            "Image_ID": img.name,
+                            "Gender": gender,
+                            "Actual": actual_disease,
+                            "Prediction": predicted_label,
+                            "Probability": confidence,
+                            "Model": model_choice
+                        }
+                        results.append(new_row)
+
+                        # Display prediction results
+                        st.markdown(f"**Prediction:** {predicted_label}")
+                        st.markdown(f"**Confidence:** {confidence:.2%}")
+                        st.markdown(f"**Actual Disease:** {actual_disease}")
+                        st.markdown(f"**Gender:** {gender}")
+
+                        # Show if prediction matches actual
+                        if actual_disease != "Unknown":
+                            if predicted_label == actual_disease:
+                                st.success("✅ Correct prediction!")
+                            else:
+                                st.error("❌ Incorrect prediction")
+
+                    except Exception as e:
+                        logging.error(f"Error processing image {img.name}", exc_info=True)
+                        st.error(f"❌ Error processing image: {e}")
+
+                progress_bar.progress(int((i / total_images) * 100))
+
+            # Update results in session state
+            if results:
+                new_results_df = pd.DataFrame(results)
+                st.session_state.df_results = pd.concat([st.session_state.df_results, new_results_df], ignore_index=True)
+
+                # Show summary of predictions
+                st.markdown("### Prediction Summary")
+                st.dataframe(new_results_df)
 
                 # Calculate and display accuracy
-    if "Actual" in new_results_df.columns and not all(new_results_df["Actual"] == "Unknown"):
-        accuracy = (new_results_df["Prediction"] == new_results_df["Actual"]).mean()
-        st.markdown(f"**Batch Accuracy:** {accuracy:.2%}")
-
-        else:
-          st.info("Upload images to generate predictions.")
+                if "Actual" in new_results_df.columns and not all(new_results_df["Actual"] == "Unknown"):
+                    accuracy = (new_results_df["Prediction"] == new_results_df["Actual"]).mean()
+                    st.markdown(f"**Batch Accuracy:** {accuracy:.2%}")
+    else:
+        st.info("Upload images to generate predictions.")
 
 def gender_bias_analysis_page():
     st.title("⚖️ Gender Bias Analysis")
@@ -1005,7 +1113,7 @@ def bias_mitigation_simulation_page():
         df_results_clean["Mitigated_Prediction"] = df_results_clean.apply(
             lambda row: 1 if (row["Gender"] == "F" and row["Binary_Prediction"] == 1 and np.random.random() <= female_adj) or
                               (row["Gender"] == "M" and row["Binary_Prediction"] == 1 and np.random.random() <= male_adj)
-                          else 0,
+                       else 0,
             axis=1
         )
 
@@ -1278,7 +1386,61 @@ def bias_mitigation_simulation_page():
         st.success("✅ Mitigated predictions saved successfully!")
 
 def gender_bias_testing_page():
-    # ... (previous code)
+    st.title("🧪 Gender Bias Testing")
+
+    df_results = st.session_state.df_results
+    if df_results.empty:
+        st.info("No prediction data available. Generate predictions first.")
+        return
+
+    st.markdown(
+        """
+        ### Interactive Bias Testing Environment
+
+        This environment allows you to experiment with different parameters and approaches
+        to understand and mitigate gender bias in model predictions.
+        """
+    )
+
+    # Remove rows with unknown gender
+    df_results_clean = df_results[df_results["Gender"] != "Unknown"].copy()
+
+    if df_results_clean.empty:
+        st.warning("No predictions with known gender available for testing.")
+        return
+
+    # Testing method selection
+    test_method = st.radio(
+        "Select Testing Method:",
+        ["Threshold Adjustment", "Data Rebalancing Simulation", "Model Ensemble Simulation"],
+        help="Choose a method to test bias mitigation approaches"
+    )
+
+    if test_method == "Threshold Adjustment":
+        st.markdown(
+            """
+            ### Threshold Adjustment Testing
+
+            Threshold adjustment is a post-processing technique that applies different classification
+            thresholds to different demographic groups to balance error rates or prediction rates.
+            """
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            thresh_F = st.slider(
+                "Threshold for Female",
+                0.0, 1.0, 0.5, 0.01,
+                help="Adjust threshold for female predictions"
+            )
+
+        with col2:
+            thresh_M = st.slider(
+                "Threshold for Male",
+                0.0, 1.0, 0.5, 0.01,
+                help="Adjust threshold for male predictions"
+            )
 
         # Binary predictions for testing
         df_results_clean["Binary_Prediction"] = (df_results_clean["Prediction"] != "No Disease").astype(int)
@@ -1912,7 +2074,131 @@ def about_densenet_model_page():
                 st.error("❌ Failed to load DenseNet121. Please try again.")
 
 def about_resnet_model_page():
-    # ... (previous code)
+    st.title("🧠 About ResNet50 Model")
+
+    st.markdown(
+        """
+        ## ResNet50: Deep Residual Network for Medical Image Analysis
+
+        **ResNet50** is a deep convolutional neural network architecture that introduced residual learning
+        to solve the vanishing gradient problem in very deep networks. It allows training of much deeper
+        networks than was previously possible.
+
+        ### Key Innovation: Residual Learning
+
+        The core innovation in ResNet is the **residual block**:
+
+        - Each block learns the residual (difference) between input and output
+        - Identity shortcut connections allow gradients to flow directly through the network
+        - This enables training of very deep networks (50+ layers) without degradation
+
+        ### Model Architecture
+
+        ResNet50 consists of:
+
+        - Initial 7×7 convolution and pooling
+        - 50 layers organized into 4 stages with residual blocks
+        - Each stage doubles the number of filters and halves spatial dimensions
+        - Global average pooling and fully connected layer for classification
+
+        ### Implementation for Chest X-rays
+
+        This implementation uses:
+
+        - PyTorch's pre-trained ResNet50 (trained on ImageNet)
+        - Transfer learning by replacing the final fully connected layer
+        - Input resolution of 224×224 pixels
+        - Standard ImageNet normalization
+
+        ### Adaptation for Medical Imaging
+
+        For chest X-ray analysis:
+
+        - The final 1000-class ImageNet classifier is replaced with a new classifier for chest pathologies
+        - Early layers (which detect basic features) are preserved from ImageNet pre-training
+        - Later layers are fine-tuned to capture domain-specific features
+
+        ### Performance Characteristics
+
+        ResNet50 chest X-ray classifiers typically show:
+
+        - Strong performance on large pathologies (cardiomegaly, pleural effusion)
+        - Good ability to generalize across different X-ray datasets
+        - Computational efficiency compared to other models with similar performance
+
+        ### Research Citation
+
+        > K. He, X. Zhang, S. Ren and J. Sun, "Deep Residual Learning for Image Recognition," 2016 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), Las Vegas, NV, 2016, pp. 770-778.
+        """
+    )
+
+    # Add visualization of the ResNet architecture
+    st.markdown("### ResNet50 Architecture")
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.markdown(
+            """
+            **ResNet50 Structure:**
+
+            1. Input layer (224×224 image)
+            2. 7×7 Conv, 64 filters
+            3. Max Pooling
+            4. Stage 1: 3 residual blocks
+            5. Stage 2: 4 residual blocks
+            6. Stage 3: 6 residual blocks
+            7. Stage 4: 3 residual blocks
+            8. Global Average Pooling
+            9. Fully Connected Layer
+            10. Sigmoid activation
+            """
+        )
+
+    with col2:
+        # Display an ASCII art diagram of the architecture
+        st.code("""
+        Input Image (224x224)
+            │
+            ▼
+        7×7 Conv, 64 + Max Pool
+            │
+            ▼
+        ┌─────────────────┐
+        │    Stage 1      │
+        │  3 Res Blocks   │
+        └─────────────────┘
+            │
+            ▼
+        ┌─────────────────┐
+        │    Stage 2      │
+        │  4 Res Blocks   │
+        └─────────────────┘
+            │
+            ▼
+        ┌─────────────────┐
+        │    Stage 3      │
+        │  6 Res Blocks   │
+        └─────────────────┘
+            │
+            ▼
+        ┌─────────────────┐
+        │    Stage 4      │
+        │  3 Res Blocks   │
+        └─────────────────┘
+            │
+            ▼
+        Global Average Pooling
+            │
+            ▼
+        Fully Connected Layer
+            │
+            ▼
+        Sigmoid Activation
+            │
+            ▼
+        Disease Predictions
+        """)
 
     # Visualization of a residual block
     st.markdown("#### Residual Block Structure")
