@@ -18,5 +18,5 @@ open-clip-torch==2.20.0
 watchdog==3.0.0
 openai==0.28.0
 albumentations
-einops==0.6.0
+einops
 accelerate
