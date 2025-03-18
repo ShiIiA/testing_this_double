@@ -11,6 +11,7 @@ import os
 import io
 import logging
 import tempfile
+import warnings  # NEW: to suppress warnings
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -32,6 +33,9 @@ from collections import Counter
 # New required imports:
 import albumentations
 import einops
+
+# Suppress PyTorch meta parameter warnings
+warnings.filterwarnings("ignore", message=".*meta parameter.*")
 
 # ------------------------- Logging Configuration -------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
