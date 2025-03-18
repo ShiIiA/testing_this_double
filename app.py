@@ -24,7 +24,7 @@ from PIL import Image
 from fairlearn.metrics import demographic_parity_difference, equalized_odds_difference
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score
 from torchvision.models import DenseNet121_Weights
-from transformers import pipeline  # For CheXagent model
+from transformers import pipeline  # (Not used anymore for CheXagent)
 import re
 from collections import Counter
 
@@ -225,12 +225,10 @@ def explore_data_page():
 
         if disease_header and gender_header:
             selected_disease = st.selectbox("Select Disease Category:", options=sorted(df[disease_header].dropna().unique()))
-            filtered_df = df[df[disease_header] == selected_disease].copy()
+            filtered_df = df[df[disease_header] == selected_disease]
             if filtered_df.empty:
                 st.info("No records found for the selected disease category.")
             else:
-                # Normalize gender labels before counting
-                filtered_df[gender_header] = filtered_df[gender_header].apply(unify_gender_label)
                 # Pre-aggregate gender counts for the pie chart.
                 gender_counts = filtered_df[gender_header].value_counts().reset_index()
                 gender_counts.columns = [gender_header, "Count"]
@@ -243,11 +241,11 @@ def explore_data_page():
                     color_discrete_map={"F": "pink", "M": "blue"},
                     hover_data=["Count"]
                 )
-                # Update trace to show percentage.
-                pie_chart.update_traces(texttemplate='%{percent:.3%}', textposition='inside')
+                # Show percentage inside slices.
+                pie_chart.update_traces(texttemplate='%{percent:.1%}', textposition='inside')
                 st.plotly_chart(pie_chart, use_container_width=True)
 
-            # Limit the sample size for the pivot table to avoid huge DataFrames.
+            # Add a slider to limit the sample size for the pivot table.
             sample_size = st.slider("Select number of rows for pivot table", min_value=100, max_value=len(df), value=min(1000, len(df)))
             df_sample = df.head(sample_size)
             pivot_df = pd.pivot_table(df_sample, index=disease_header, columns=gender_header, aggfunc='size', fill_value=0)
@@ -288,9 +286,10 @@ def explore_data_page():
 def model_prediction_page():
     st.title("🤖 Model Prediction")
     st.markdown("Select an AI model and upload chest X‑ray images for prediction.")
-    model_choice = st.selectbox("Select AI Model:", ["CheXNet", "CheXagent"], help="Choose the model to use for prediction.")
+    # Use only CheXNet; fixed threshold of 0.5
+    st.markdown("Using CheXNet with fixed threshold 0.5")
     uploaded_images = st.file_uploader("Upload X‑ray Images", type=["png", "jpg", "jpeg"], accept_multiple_files=True, help="Upload one or more images.")
-    threshold = st.slider("Decision Threshold", 0.0, 1.0, 0.5, 0.01, help="Adjust the threshold for classifying images as positive for disease.")
+    fixed_threshold = 0.5
     if uploaded_images:
         with st.spinner("Processing images..."):
             progress_bar = st.progress(0)
@@ -301,18 +300,12 @@ def model_prediction_page():
                 try:
                     image = Image.open(img).convert("RGB")
                     tensor_img = preprocess_image(image)
-                    if model_choice == "CheXNet":
-                        tensor_img = tensor_img.to(device)
-                        with torch.no_grad():
-                            logits = chexnet_model(tensor_img)
-                            probs = F.softmax(logits, dim=1)
-                            disease_prob = probs[0, 1].item()
-                            predicted_label = 1 if disease_prob >= threshold else 0
-                    elif model_choice == "CheXagent":
-                        chexagent_pipe = pipeline("image-classification", model="StanfordAIMI/CheXagent-2-3b", trust_remote_code=True)
-                        result = chexagent_pipe(image)
-                        disease_prob = result[0]["score"]
-                        predicted_label = 1 if disease_prob >= threshold else 0
+                    tensor_img = tensor_img.to(device)
+                    with torch.no_grad():
+                        logits = chexnet_model(tensor_img)
+                        probs = F.softmax(logits, dim=1)
+                        disease_prob = probs[0, 1].item()
+                        predicted_label = 1 if disease_prob >= fixed_threshold else 0
                     new_row = {"Image_ID": img.name, "Gender": "Unknown", "Prediction": predicted_label, "Probability": disease_prob}
                     st.session_state.df_results = pd.concat([st.session_state.df_results, pd.DataFrame([new_row])], ignore_index=True)
                     st.success(f"Prediction: {'Disease Detected' if predicted_label == 1 else 'No Disease'} | Prob: {disease_prob:.2%}")
@@ -406,22 +399,15 @@ def bias_mitigation_simulation_page():
 
 def gender_bias_testing_page():
     st.title("🧪 Gender Bias Testing")
-    st.markdown("### Test Bias Mitigation via Threshold Adjustment")
+    st.markdown("### Test Bias Mitigation")
     df_results = st.session_state.df_results
     if df_results.empty:
         st.info("No prediction data available. Generate predictions first.")
     else:
-        thresh_F = st.slider("Threshold for Female", 0.0, 1.0, 0.5, 0.01, help="Adjust threshold for female predictions.")
-        thresh_M = st.slider("Threshold for Male", 0.0, 1.0, 0.5, 0.01, help="Adjust threshold for male predictions.")
+        # Fixed threshold of 0.5 for all predictions
+        fixed_threshold = 0.5
         df_new = df_results.copy()
-        def adjust_pred(row):
-            if row["Gender"] == "M":
-                return 1 if row["Probability"] >= thresh_M else 0
-            elif row["Gender"] == "F":
-                return 1 if row["Probability"] >= thresh_F else 0
-            else:
-                return row["Prediction"]
-        df_new["Adjusted_Prediction"] = df_new.apply(adjust_pred, axis=1)
+        df_new["Adjusted_Prediction"] = df_new["Prediction"].apply(lambda x: 1 if x >= fixed_threshold else 0)
         total_F = df_new[df_new["Gender"] == "F"].shape[0]
         total_M = df_new[df_new["Gender"] == "M"].shape[0]
         F_disease = df_new[(df_new["Gender"] == "F") & (df_new["Adjusted_Prediction"] == 1)].shape[0]
@@ -530,10 +516,7 @@ def about_chexagent_page():
         """
         **CheXagent** is a chest X‑ray analysis model provided by Stanford AIMI on Hugging Face.
 
-        - Model: StanfordAIMI/CheXagent-2-3b
-        - Description: A lightweight model for rapid chest X‑ray analysis.
-        - Integration: Loaded via the Transformers library using an image-classification pipeline.
-        - Repository: [CheXagent on Hugging Face](https://huggingface.co/StanfordAIMI/CheXagent-2-3b)
+        - Model: StanfordAIMI/CheXagent-2-3b (Not used in this version)
         """
     )
 
@@ -575,14 +558,14 @@ def chatbot_page():
 def posters_page():
     st.title("🖼️ Posters")
     st.markdown("Below are our project posters:")
-    # Only keep posters 1, 4, and 5.
+    # Only display posters 1, 4, and 5.
     poster_files = ["1.png", "4.png", "5.png"]
     cols = st.columns(len(poster_files))
     for i, poster in enumerate(poster_files):
         with cols[i]:
             poster_path = os.path.join("images", poster)
             if os.path.exists(poster_path):
-                st.image(poster_path)
+                st.image(poster_path, caption=f"Poster {poster.split('.')[0]}")
             else:
                 st.error(f"Image not found: {poster_path}")
 
@@ -630,9 +613,9 @@ def feedback_page():
 
 def interactive_demos_page():
     st.title("🔍 Interactive Demonstrations")
-    st.markdown("Compare predictions from CheXNet and CheXagent side by side.")
+    st.markdown("Compare predictions from CheXNet side by side.")
     uploaded_image = st.file_uploader("Upload a single X‑ray image", type=["png", "jpg", "jpeg"])
-    threshold = st.slider("Decision Threshold", 0.0, 1.0, 0.5, 0.01)
+    threshold = 0.5  # Fixed threshold
     if uploaded_image:
         image = Image.open(uploaded_image).convert("RGB")
         st.image(image, caption="Uploaded X‑ray", width=300)
@@ -643,20 +626,9 @@ def interactive_demos_page():
             probs = F.softmax(logits, dim=1)
             chexnet_prob = probs[0, 1].item()
             chexnet_pred = 1 if chexnet_prob >= threshold else 0
-        chexagent_pipe = pipeline("image-classification", model="StanfordAIMI/CheXagent-2-3b", trust_remote_code=True)
-        result = chexagent_pipe(image)
-        chexagent_prob = result[0]["score"]
-        chexagent_pred = 1 if chexagent_prob >= threshold else 0
-        st.markdown("### Predictions Comparison")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**CheXNet**")
-            st.write(f"Prediction: {'Disease' if chexnet_pred == 1 else 'No Disease'}")
-            st.write(f"Probability: {chexnet_prob:.2%}")
-        with col2:
-            st.markdown("**CheXagent**")
-            st.write(f"Prediction: {'Disease' if chexagent_pred == 1 else 'No Disease'}")
-            st.write(f"Probability: {chexagent_prob:.2%}")
+        st.markdown("### CheXNet Prediction")
+        st.write(f"Prediction: {'Disease' if chexnet_pred == 1 else 'No Disease'}")
+        st.write(f"Probability: {chexnet_prob:.2%}")
     else:
         st.info("Upload an image for comparison.")
 
