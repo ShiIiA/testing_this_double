@@ -194,14 +194,27 @@ def unify_disease_label(label):
         return "No Disease"
     return text
 
-def preprocess_image(image):
-    """Preprocess image for model input"""
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ImageNet normalization
-    ])
-    return transform(image).unsqueeze(0)
+def preprocess_image(image, model_name):
+    """Preprocess image for model input based on model type"""
+    # Convert to grayscale first for medical imaging models
+    if image.mode != 'L':  # If not already grayscale
+        image = image.convert('L')
+
+    # Different preprocessing depending on model source
+    if model_name in MODELS and MODELS[model_name]["source"] == "torchxrayvision":
+        # Use TorchXRayVision's preprocessing
+        img = xrv.datasets.normalize(np.array(image), 224)
+        tensor_img = torch.from_numpy(img).unsqueeze(0)
+    else:
+        # Standard preprocessing for PyTorch models
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485], std=[0.229])  # Single channel normalization
+        ])
+        tensor_img = transform(image).unsqueeze(0)
+
+    return tensor_img
 
 def predict_disease(image, model_name, threshold=0.5):
     """Predict disease from image using specified model"""
@@ -210,7 +223,7 @@ def predict_disease(image, model_name, threshold=0.5):
         return None, None
 
     model = st.session_state.models_loaded[model_name]
-    tensor_img = preprocess_image(image).to(st.session_state.device)
+    tensor_img = preprocess_image(image, model_name).to(st.session_state.device)
 
     with torch.no_grad():
         if MODELS[model_name]["source"] == "torchxrayvision":
@@ -598,116 +611,7 @@ def explore_data_page():
         st.info("No data uploaded. Please use the Upload Data page.")
 
 def model_prediction_page():
-    st.title("🤖 Model Prediction")
-    st.markdown("Select an AI model and upload chest X-ray images for prediction.")
-
-    if st.session_state.df is None:
-        st.warning("⚠️ Please upload and process a dataset before making predictions.")
-        return
-
-    if not st.session_state.disease_classes:
-        st.warning("⚠️ No disease classes detected. Please ensure you've selected the correct disease column.")
-        return
-
-    # Check if any models are loaded
-    if not st.session_state.models_loaded:
-        st.warning("⚠️ No models are loaded. Please go to the Home page and load at least one model.")
-        return
-
-    # Model selection
-    model_choice = st.selectbox(
-        "Select AI Model:",
-        list(st.session_state.models_loaded.keys()),
-        help="Choose the model to use for prediction."
-    )
-
-    # Decision threshold
-    threshold = st.slider(
-        "Decision Threshold",
-        0.0, 1.0, 0.5, 0.01,
-        help="Adjust the threshold for positive disease classification."
-    )
-
-    # Upload images
-    uploaded_images = st.file_uploader(
-        "Upload X-ray Images",
-        type=["png", "jpg", "jpeg"],
-        accept_multiple_files=True,
-        help="Upload one or more chest X-ray images for analysis."
-    )
-
-    if uploaded_images:
-        with st.spinner("Processing images..."):
-            progress_bar = st.progress(0)
-            total_images = len(uploaded_images)
-            results = []
-
-            for i, img in enumerate(uploaded_images, start=1):
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.write(f"Processing Image {i}/{total_images}")
-                    st.image(img, caption=f"Uploaded: {img.name}", width=300)
-
-                with col2:
-                    try:
-                        # Process image
-                        image = Image.open(img).convert("RGB")
-                        predicted_label, confidence = predict_disease(image, model_choice, threshold)
-
-                        # Try to find the actual label and gender in the dataset
-                        image_id = os.path.splitext(img.name)[0]
-                        df = st.session_state.df
-                        id_col = st.session_state.image_id_col
-
-                        # Find the image in the dataset
-                        matches = df[df[id_col].astype(str).str.contains(image_id, case=False, na=False)]
-
-                        if not matches.empty:
-                            # Get actual disease and gender
-                            actual_disease = matches.iloc[0][st.session_state.disease_col]
-                            gender = matches.iloc[0][st.session_state.gender_col]
-                        else:
-                            actual_disease = "Unknown"
-                            gender = "Unknown"
-
-                        # Add result to our tracking dataframe
-                        new_row = {
-                            "Image_ID": img.name,
-                            "Gender": gender,
-                            "Actual": actual_disease,
-                            "Prediction": predicted_label,
-                            "Probability": confidence,
-                            "Model": model_choice
-                        }
-                        results.append(new_row)
-
-                        # Display prediction results
-                        st.markdown(f"**Prediction:** {predicted_label}")
-                        st.markdown(f"**Confidence:** {confidence:.2%}")
-                        st.markdown(f"**Actual Disease:** {actual_disease}")
-                        st.markdown(f"**Gender:** {gender}")
-
-                        # Show if prediction matches actual
-                        if actual_disease != "Unknown":
-                            if predicted_label == actual_disease:
-                                st.success("✅ Correct prediction!")
-                            else:
-                                st.error("❌ Incorrect prediction")
-
-                    except Exception as e:
-                        logging.error(f"Error processing image {img.name}", exc_info=True)
-                        st.error(f"❌ Error processing image: {e}")
-
-                progress_bar.progress(int((i / total_images) * 100))
-
-            # Update results in session state
-            if results:
-                new_results_df = pd.DataFrame(results)
-                st.session_state.df_results = pd.concat([st.session_state.df_results, new_results_df], ignore_index=True)
-
-                # Show summary of predictions
-                st.markdown("### Prediction Summary")
-                st.dataframe(new_results_df)
+    # ... (previous code)
 
                 # Calculate and display accuracy
                 if "Actual" in new_results_df.columns and not all(new_results_df["Actual"] == "Unknown"):
@@ -1372,683 +1276,8 @@ def bias_mitigation_simulation_page():
 
         st.success("✅ Mitigated predictions saved successfully!")
 
-def about_densenet_model_page():
-    st.title("🧠 About DenseNet121 Model")
-
-    st.markdown(
-        """
-        ## DenseNet121: Deep Convolutional Network for Chest X-ray Classification
-
-        **DenseNet121** is a convolutional neural network architecture that incorporates dense connectivity
-        patterns to improve feature propagation, encourage feature reuse, and substantially reduce the
-        number of parameters.
-
-        ### Model Architecture
-
-        The DenseNet121 architecture includes:
-
-        - **121 layers** with convolutional and pooling operations
-        - **Dense connectivity** where each layer receives feature maps from all preceding layers
-        - **Transition layers** (compression) between dense blocks
-        - **Global average pooling** followed by a fully connected layer
-
-        ### Implementation Details
-
-        This implementation uses:
-
-        - PyTorch's pre-trained DenseNet121 (trained on ImageNet)
-        - Transfer learning by replacing the final classification layer
-        - Input resolution of 224×224 pixels
-        - Standard ImageNet normalization
-
-        ### Training Process
-
-        The base model is pre-trained on ImageNet and then fine-tuned for chest X-ray classification:
-
-        1. The original ImageNet classifier (1000 classes) is replaced with a new classifier for chest pathologies
-        2. The model is trained using a weighted binary cross-entropy loss
-        3. Augmentation techniques are applied to reduce overfitting
-
-        ### Performance
-
-        DenseNet121-based chest X-ray models typically achieve:
-
-        - AUC > 0.80 for common thoracic diseases
-        - Comparable performance to radiologists for certain conditions
-        - Good generalization across different datasets
-
-        ### Advantages
-
-        - Efficient parameter usage through feature reuse
-        - Strong gradient flow through dense connections
-        - Reduced vanishing gradient problems
-        - Lower computational requirements than many comparable architectures
-
-        ### Research Citation
-
-        > G. Huang, Z. Liu, L. Van Der Maaten and K. Q. Weinberger, "Densely Connected Convolutional Networks," 2017 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), Honolulu, HI, 2017, pp. 4700-4708.
-        """
-    )
-
-    # Add visualization of model architecture
-    st.markdown("### DenseNet121 Architecture")
-
-    col1, col2 = st.columns([1, 2])
-
-    with col1:
-        st.markdown(
-            """
-            **DenseNet-121 Structure:**
-
-            1. Input layer (224×224 image)
-            2. Initial convolution and pooling
-            3. Dense blocks with transition layers:
-               - Dense Block 1 (6 layers)
-               - Transition Layer 1
-               - Dense Block 2 (12 layers)
-               - Transition Layer 2
-               - Dense Block 3 (24 layers)
-               - Transition Layer 3
-               - Dense Block 4 (16 layers)
-            4. Global Average Pooling
-            5. Fully Connected Layer
-            6. Sigmoid activation (multi-label output)
-            """
-        )
-
-    with col2:
-        # Display an ASCII art diagram of the architecture
-        st.code("""
-        Input Image (224x224)
-            │
-            ▼
-        Convolution + Pooling
-            │
-            ▼
-        ┌─────────────────┐
-        │  Dense Block 1  │
-        │   (6 layers)    │
-        └─────────────────┘
-            │
-            ▼
-        Transition Layer 1
-            │
-            ▼
-        ┌─────────────────┐
-        │  Dense Block 2  │
-        │   (12 layers)   │
-        └─────────────────┘
-            │
-            ▼
-        Transition Layer 2
-            │
-            ▼
-        ┌─────────────────┐
-        │  Dense Block 3  │
-        │   (24 layers)   │
-        └─────────────────┘
-            │
-            ▼
-        Transition Layer 3
-            │
-            ▼
-        ┌─────────────────┐
-        │  Dense Block 4  │
-        │   (16 layers)   │
-        └─────────────────┘
-            │
-            ▼
-        Global Average Pooling
-            │
-            ▼
-        Fully Connected Layer
-            │
-            ▼
-        Sigmoid Activation
-            │
-            ▼
-        Disease Predictions
-        """)
-
-    # Add a load button
-    if st.button("Load DenseNet121 Model"):
-        with st.spinner("Loading DenseNet121..."):
-            if load_model("DenseNet121"):
-                st.success("✅ DenseNet121 loaded successfully!")
-            else:
-                st.error("❌ Failed to load DenseNet121. Please try again.")
-
-def about_resnet_model_page():
-    st.title("🧠 About ResNet50 Model")
-
-    st.markdown(
-        """
-        ## ResNet50: Deep Residual Network for Medical Image Analysis
-
-        **ResNet50** is a deep convolutional neural network architecture that introduced residual learning
-        to solve the vanishing gradient problem in very deep networks. It allows training of much deeper
-        networks than was previously possible.
-
-        ### Key Innovation: Residual Learning
-
-        The core innovation in ResNet is the **residual block**:
-
-        - Each block learns the residual (difference) between input and output
-        - Identity shortcut connections allow gradients to flow directly through the network
-        - This enables training of very deep networks (50+ layers) without degradation
-
-        ### Model Architecture
-
-        ResNet50 consists of:
-
-        - Initial 7×7 convolution and pooling
-        - 50 layers organized into 4 stages with residual blocks
-        - Each stage doubles the number of filters and halves spatial dimensions
-        - Global average pooling and fully connected layer for classification
-
-        ### Implementation for Chest X-rays
-
-        This implementation uses:
-
-        - PyTorch's pre-trained ResNet50 (trained on ImageNet)
-        - Transfer learning by replacing the final fully connected layer
-        - Input resolution of 224×224 pixels
-        - Standard ImageNet normalization
-
-        ### Adaptation for Medical Imaging
-
-        For chest X-ray analysis:
-
-        - The final 1000-class ImageNet classifier is replaced with a new classifier for chest pathologies
-        - Early layers (which detect basic features) are preserved from ImageNet pre-training
-        - Later layers are fine-tuned to capture domain-specific features
-
-        ### Performance Characteristics
-
-        ResNet50 chest X-ray classifiers typically show:
-
-        - Strong performance on large pathologies (cardiomegaly, pleural effusion)
-        - Good ability to generalize across different X-ray datasets
-        - Computational efficiency compared to other models with similar performance
-
-        ### Research Citation
-
-        > K. He, X. Zhang, S. Ren and J. Sun, "Deep Residual Learning for Image Recognition," 2016 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), Las Vegas, NV, 2016, pp. 770-778.
-        """
-    )
-
-    # Add visualization of the ResNet architecture
-    st.markdown("### ResNet50 Architecture")
-
-    col1, col2 = st.columns([1, 2])
-
-    with col1:
-        st.markdown(
-            """
-            **ResNet50 Structure:**
-
-            1. Input layer (224×224 image)
-            2. 7×7 Conv, 64 filters
-            3. Max Pooling
-            4. Stage 1: 3 residual blocks
-            5. Stage 2: 4 residual blocks
-            6. Stage 3: 6 residual blocks
-            7. Stage 4: 3 residual blocks
-            8. Global Average Pooling
-            9. Fully Connected Layer
-            10. Sigmoid activation
-            """
-        )
-
-    with col2:
-        # Display an ASCII art diagram of the architecture
-        st.code("""
-        Input Image (224x224)
-            │
-            ▼
-        7×7 Conv, 64 + Max Pool
-            │
-            ▼
-        ┌─────────────────┐
-        │    Stage 1      │
-        │  3 Res Blocks   │
-        └─────────────────┘
-            │
-            ▼
-        ┌─────────────────┐
-        │    Stage 2      │
-        │  4 Res Blocks   │
-        └─────────────────┘
-            │
-            ▼
-        ┌─────────────────┐
-        │    Stage 3      │
-        │  6 Res Blocks   │
-        └─────────────────┘
-            │
-            ▼
-        ┌─────────────────┐
-        │    Stage 4      │
-        │  3 Res Blocks   │
-        └─────────────────┘
-            │
-            ▼
-        Global Average Pooling
-            │
-            ▼
-        Fully Connected Layer
-            │
-            ▼
-        Sigmoid Activation
-            │
-            ▼
-        Disease Predictions
-        """)
-
-        # Visualization of a residual block
-        st.markdown("#### Residual Block Structure")
-        st.code("""
-             Input
-               │
-        ┌──────┴──────┐
-        │             │
-        ▼             │
-        Conv          │
-        │             │
-        ▼             │
-        BatchNorm     │
-        │             │
-        ▼             │
-        ReLU          │
-        │             │
-        ▼             │
-        Conv          │
-        │             │
-        ▼             │
-        BatchNorm     │
-        │             │
-        └──────┬──────┘
-               │
-               ▼
-             Add
-               │
-               ▼
-             ReLU
-               │
-               ▼
-            Output
-        """)
-
-    # Add a load button
-    if st.button("Load ResNet50 Model"):
-        with st.spinner("Loading ResNet50..."):
-            if load_model("ResNet50"):
-                st.success("✅ ResNet50 loaded successfully!")
-            else:
-                st.error("❌ Failed to load ResNet50. Please try again.")
-
-def about_chexpert_model_page():
-    st.title("🧠 About CheXpert Model")
-
-    st.markdown(
-        """
-        ## CheXpert: Stanford's Chest X-ray Interpretation Model
-
-        **CheXpert** is a deep learning model for chest X-ray interpretation developed at Stanford University.
-        It was trained on the CheXpert dataset, one of the largest publicly available chest X-ray datasets.
-
-        ### The CheXpert Dataset
-
-        - 224,316 chest radiographs from 65,240 patients
-        - Collected from Stanford Hospital between 2002-2017
-        - Labels extracted from radiology reports using natural language processing
-        - 14 common chest radiographic observations including support devices
-
-        ### Model Design
-
-        The CheXpert model implemented here via TorchXRayVision:
-
-        - Uses a DenseNet121 backbone architecture
-        - Trained specifically on chest radiographs (not transferred from natural images)
-        - Handles the uncertainty in radiology reports with a specialized labeling policy
-        - Optimized for multi-label classification of 14 findings
-
-        ### Unique Training Approach
-
-        CheXpert uses an innovative approach to handle uncertain labels:
-
-        - Labels are extracted from reports as **positive**, **negative**, or **uncertain**
-        - Uncertain labels are treated with a special policy (either ignored, treated as negative, or treated as positive)
-        - This approach addresses the inherent uncertainty in radiological reports
-
-        ### Performance Benchmarks
-
-        In the original study, CheXpert achieved:
-
-        - Radiologist-level performance on 5 pathologies: atelectasis, cardiomegaly, consolidation, edema, and pleural effusion
-        - ROC-AUC > 0.90 for cardiomegaly and edema
-        - ROC-AUC > 0.85 for pleural effusion and consolidation
-
-        ### Integration Details
-
-        This implementation uses:
-
-        - Pre-trained weights from TorchXRayVision library
-        - DenseNet121 architecture with 224×224 resolution
-        - Standard chest X-ray preprocessing with normalization
-        - No further fine-tuning required
-
-        ### Research Citation
-
-        > Irvin, J., Rajpurkar, P., Ko, M., Yu, Y., Ciurea-Ilcus, S., Chute, C., Marklund, H., Haghgoo, B., Ball, R., Shpanskaya, K., Seekins, J., Mong, D.A., Halabi, S.S., Sandberg, J.K., Jones, R., Larson, D.B., Langlotz, C.P., Patel, B.N., Lungren, M.P., & Ng, A.Y. (2019). CheXpert: A Large Chest Radiograph Dataset with Uncertainty Labels and Expert Comparison. Proceedings of the AAAI Conference on Artificial Intelligence, 33, 590-597.
-        """
-    )
-
-    # Display information about pathologies
-    st.markdown("### Pathologies Detected")
-
-    pathologies = xrv.datasets.default_pathologies
-
-    # Create a more visual display of pathologies
-    num_columns = 3
-    col_list = st.columns(num_columns)
-
-    for i, pathology in enumerate(pathologies):
-        col_index = i % num_columns
-        with col_list[col_index]:
-            st.markdown(f"✓ **{pathology}**")
-
-    # Add information about the model's performance
-    st.markdown("### Performance Characteristics")
-
-    # Add a load button
-    if st.button("Load CheXpert Model"):
-        with st.spinner("Loading CheXpert..."):
-            if load_model("CheXpert"):
-                st.success("✅ CheXpert model loaded successfully!")
-            else:
-                st.error("❌ Failed to load CheXpert model. Please try again.")
-
-def about_mimic_model_page():
-    st.title("🧠 About MIMIC-CXR Model")
-
-    st.markdown(
-        """
-        ## MIMIC-CXR: MIT's Chest X-ray Model for Diverse Populations
-
-        **MIMIC-CXR** is a deep learning model trained on the MIMIC-CXR dataset, a large publicly available
-        dataset of chest X-rays from the Beth Israel Deaconess Medical Center in Boston, collected from 2011-2016.
-
-        ### The MIMIC-CXR Dataset
-
-        - Over 377,000 chest X-rays from more than 65,000 patients
-        - Demographically diverse patient population from urban hospital setting
-        - Free-text radiology reports with structured labels
-        - Developed by MIT Lab for Computational Physiology
-
-        ### Model Architecture
-
-        The MIMIC-CXR model implemented via TorchXRayVision:
-
-        - DenseNet121 backbone architecture
-        - Native training on chest X-rays (not transferred from natural images)
-        - 224×224 pixel input resolution
-        - Multi-label classification across 14 common findings
-
-        ### Training Process and Optimization
-
-        - Labels extracted via the CheXpert labeler for consistency
-        - Trained using a weighted binary cross-entropy loss
-        - Optimization via Adam optimizer with learning rate scheduling
-        - Data augmentation to improve generalization
-
-        ### Clinical Relevance
-
-        MIMIC-CXR is particularly valuable for:
-
-        - Applications requiring good performance across diverse demographics
-        - Clinical settings similar to urban hospital environments
-        - Research on algorithmic fairness in medical AI
-        - Longitudinal patient studies (dataset includes multiple studies per patient)
-
-        ### Model Advantages
-
-        - Strong performance across diverse patient demographics
-        - Good generalization to external datasets
-        - Public availability through TorchXRayVision
-        - Consistent labeling with CheXpert for comparability
-
-        ### Research Citation
-
-        > Johnson, A., Pollard, T., Mark, R., Berkowitz, S., & Horng, S. (2019). MIMIC-CXR Database (version 2.0.0). PhysioNet. https://doi.org/10.13026/C2JT1Q.
-
-        > Johnson, A.E.W., Pollard, T.J., Berkowitz, S.J. et al. MIMIC-CXR, a de-identified publicly available database of chest radiographs with free-text reports. Sci Data 6, 317 (2019). https://doi.org/10.1038/s41597-019-0322-0
-        """
-    )
-
-    # Display information about pathologies
-    st.markdown("### Pathologies Detected")
-
-    pathologies = xrv.datasets.default_pathologies
-
-    # Create a more visual display of pathologies
-    num_columns = 3
-    col_list = st.columns(num_columns)
-
-    for i, pathology in enumerate(pathologies):
-        col_index = i % num_columns
-        with col_list[col_index]:
-            st.markdown(f"✓ **{pathology}**")
-
-    # Add performance metrics
-    st.markdown("### Bias Characteristics")
-
-    st.markdown("""
-    MIMIC-CXR model has been studied for demographic bias, with research showing:
-
-    - Similar overall performance across different racial groups
-    - Some variations in performance by gender for specific conditions
-    - Better performance on older patient populations compared to pediatric cases
-    - Performance differences that correlate with clinical presentation variations across demographics
-    """)
-
-    # Add a load button
-    if st.button("Load MIMIC-CXR Model"):
-        with st.spinner("Loading MIMIC-CXR..."):
-            if load_model("MIMIC-CXR"):
-                st.success("✅ MIMIC-CXR model loaded successfully!")
-            else:
-                st.error("❌ Failed to load MIMIC-CXR model. Please try again.")
-
-def importance_gender_bias_page():
-    st.title("📚 The Importance of Gender Bias")
-
-    st.markdown(
-        """
-        ## Why Addressing Gender Bias in Medical AI Matters
-
-        Gender bias in AI systems used for medical diagnosis can have significant real-world impacts on patient care and outcomes.
-
-        ### Ethical Imperatives
-
-        - **Fairness and Justice**: Healthcare systems should provide equal quality of care to all patients regardless of gender
-        - **Non-maleficence**: AI systems should not cause harm by systematically misdiagnosing particular demographic groups
-        - **Transparency**: Users of AI systems should understand potential biases and limitations
-
-        ### Clinical Impact
-
-        - **Diagnostic Disparities**: Biased models may miss diseases that present differently across genders
-        - **Treatment Delays**: False negatives can lead to delayed treatment for vulnerable populations
-        - **Resource Allocation**: Biased prioritization can affect access to limited healthcare resources
-
-        ### Regulatory Requirements
-
-        - **FDA Guidance**: Emerging regulations on AI in healthcare require fairness considerations
-        - **Legal Liability**: Healthcare institutions may face liability for deploying biased systems
-        - **Equal Treatment Mandates**: Many jurisdictions legally require equitable healthcare provision
-        """
-    )
-
-    st.markdown("### Key Research on Gender Bias in AI Healthcare")
-
-    research = [
-        {
-            "title": "A survey on bias and fairness in machine learning",
-            "authors": "Mehrabi et al. (2021)",
-            "findings": "Comprehensive review of various types of biases that can affect ML systems, including those in healthcare"
-        },
-        {
-            "title": "Dissecting racial bias in an algorithm used to manage the health of populations",
-            "authors": "Obermeyer et al. (2019)",
-            "findings": "Found that a widely used algorithm exhibited significant racial bias, underestimating the needs of Black patients"
-        },
-        {
-            "title": "Gender imbalance in medical imaging datasets produces biased classifiers for computer-aided diagnosis",
-            "authors": "Larrazabal et al. (2020)",
-            "findings": "Demonstrated that gender imbalances in training data lead to significant performance disparities by gender"
-        }
-    ]
-
-    for i, paper in enumerate(research):
-        with st.expander(f"{i+1}. {paper['title']} ({paper['authors']})"):
-            st.markdown(f"**Key Findings:** {paper['findings']}")
-
-    st.markdown("### Mitigation Strategies")
-
-    st.markdown(
-        """
-        Several approaches can help address gender bias in medical AI:
-
-        1. **Data Representation**: Ensure diverse and balanced training datasets
-        2. **Algorithmic Techniques**: Apply technical bias mitigation methods (as demonstrated in this app)
-        3. **Evaluation Protocols**: Test models across demographic subgroups before deployment
-        4. **Continuous Monitoring**: Track performance disparities in real-world usage
-        5. **Stakeholder Inclusion**: Involve diverse clinicians and patients in development
-        """
-    )
-
-def project_overview_page():
-    st.title("📈 Project Overview")
-
-    st.markdown(
-        """
-        ## Project Objective
-
-        This application is designed to help healthcare organizations and AI developers detect and mitigate gender bias in chest X-ray interpretation models. Our goal is to ensure that AI tools in radiology deliver equitable performance across all patient demographics.
-
-        ### Key Features
-
-        1. **Data Exploration**: Upload and analyze medical imaging datasets
-        2. **Multiple AI Models**: Compare performance across state-of-the-art chest X-ray models
-        3. **Bias Detection**: Quantify gender disparities in model predictions
-        4. **Mitigation Techniques**: Apply and evaluate various bias mitigation approaches
-        5. **Explainable Analysis**: Understand the patterns behind model errors and bias
-
-        ### Impact
-
-        - **Clinical Safety**: Reduce misdiagnosis risks for underrepresented groups
-        - **Regulatory Compliance**: Meet emerging requirements for AI fairness
-        - **Improved Accessibility**: Make advanced AI diagnostics safe for all patients
-        """
-    )
-
-    st.markdown("### Project Workflow")
-
-    workflow_steps = [
-        "Upload and analyze dataset",
-        "Explore data characteristics and demographics",
-        "Select and run AI models for disease prediction",
-        "Analyze gender bias in model predictions",
-        "Apply bias mitigation techniques",
-        "Test and validate mitigation effectiveness"
-    ]
-
-    for i, step in enumerate(workflow_steps):
-        st.markdown(f"**Step {i+1}:** {step}")
-
-def meet_the_team_page():
-    st.title("👥 Meet the Team")
-
-    team_members = [
-        {"name": "Yuying", "role": "Data Scientist", "image": "Yuying.webp"},
-        {"name": "Siwen", "role": "ML Engineer", "image": "Siwen.webp"},
-        {"name": "Zhi", "role": "Research Analyst", "image": "Zhi.webp"},
-        {"name": "Maude", "role": "UX Designer", "image": "Maude.webp"}
-    ]
-
-    # Create a tab for each team member
-    tabs = st.tabs([member["name"] for member in team_members])
-
-    for tab, member in zip(tabs, team_members):
-        with tab:
-            # Try to display image if available
-            try:
-                if os.path.exists(member["image"]):
-                    st.image(member["image"], width=150)
-                else:
-                    st.error(f"Image not found: {member['image']}")
-            except:
-                st.info(f"Image not available for {member['name']}")
-
-            st.write(f"**{member['name']}**")
-            st.write(f"*{member['role']}*")
-
 def gender_bias_testing_page():
-    st.title("🧪 Gender Bias Testing")
-
-    df_results = st.session_state.df_results
-    if df_results.empty:
-        st.info("No prediction data available. Generate predictions first.")
-        return
-
-    st.markdown(
-        """
-        ### Interactive Bias Testing Environment
-
-        This environment allows you to experiment with different parameters and approaches
-        to understand and mitigate gender bias in model predictions.
-        """
-    )
-
-    # Remove rows with unknown gender
-    df_results_clean = df_results[df_results["Gender"] != "Unknown"].copy()
-
-    if df_results_clean.empty:
-        st.warning("No predictions with known gender available for testing.")
-        return
-
-    # Testing method selection
-    test_method = st.radio(
-        "Select Testing Method:",
-        ["Threshold Adjustment", "Data Rebalancing Simulation", "Model Ensemble Simulation"],
-        help="Choose a method to test bias mitigation approaches"
-    )
-
-    if test_method == "Threshold Adjustment":
-        st.markdown(
-            """
-            ### Threshold Adjustment Testing
-
-            Threshold adjustment is a post-processing technique that applies different classification
-            thresholds to different demographic groups to balance error rates or prediction rates.
-            """
-        )
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            thresh_F = st.slider(
-                "Threshold for Female",
-                0.0, 1.0, 0.5, 0.01,
-                help="Adjust threshold for female predictions"
-            )
-
-        with col2:
-            thresh_M = st.slider(
-                "Threshold for Male",
-                0.0, 1.0, 0.5, 0.01,
-                help="Adjust threshold for male predictions"
-            )
+    # ... (previous code)
 
         # Binary predictions for testing
         df_results_clean["Binary_Prediction"] = (df_results_clean["Prediction"] != "No Disease").astype(int)
@@ -2534,6 +1763,488 @@ def explainable_analysis_page():
                     f"✅ **Minimal gender imbalance detected: {imbalance:.1f}% difference**\n\n"
                     "The dataset has relatively balanced gender representation, which helps reduce bias."
                 )
+
+def about_densenet_model_page():
+    st.title("🧠 About DenseNet121 Model")
+
+    st.markdown(
+        """
+        ## DenseNet121: Deep Convolutional Network for Chest X-ray Classification
+
+        **DenseNet121** is a convolutional neural network architecture that incorporates dense connectivity
+        patterns to improve feature propagation, encourage feature reuse, and substantially reduce the
+        number of parameters.
+
+        ### Model Architecture
+
+        The DenseNet121 architecture includes:
+
+        - **121 layers** with convolutional and pooling operations
+        - **Dense connectivity** where each layer receives feature maps from all preceding layers
+        - **Transition layers** (compression) between dense blocks
+        - **Global average pooling** followed by a fully connected layer
+
+        ### Implementation Details
+
+        This implementation uses:
+
+        - PyTorch's pre-trained DenseNet121 (trained on ImageNet)
+        - Transfer learning by replacing the final classification layer
+        - Input resolution of 224×224 pixels
+        - Standard ImageNet normalization
+
+        ### Training Process
+
+        The base model is pre-trained on ImageNet and then fine-tuned for chest X-ray classification:
+
+        1. The original ImageNet classifier (1000 classes) is replaced with a new classifier for chest pathologies
+        2. The model is trained using a weighted binary cross-entropy loss
+        3. Augmentation techniques are applied to reduce overfitting
+
+        ### Performance
+
+        DenseNet121-based chest X-ray models typically achieve:
+
+        - AUC > 0.80 for common thoracic diseases
+        - Comparable performance to radiologists for certain conditions
+        - Good generalization across different datasets
+
+        ### Advantages
+
+        - Efficient parameter usage through feature reuse
+        - Strong gradient flow through dense connections
+        - Reduced vanishing gradient problems
+        - Lower computational requirements than many comparable architectures
+
+        ### Research Citation
+
+        > G. Huang, Z. Liu, L. Van Der Maaten and K. Q. Weinberger, "Densely Connected Convolutional Networks," 2017 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), Honolulu, HI, 2017, pp. 4700-4708.
+        """
+    )
+
+    # Add visualization of model architecture
+    st.markdown("### DenseNet121 Architecture")
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.markdown(
+            """
+            **DenseNet-121 Structure:**
+
+            1. Input layer (224×224 image)
+            2. Initial convolution and pooling
+            3. Dense blocks with transition layers:
+               - Dense Block 1 (6 layers)
+               - Transition Layer 1
+               - Dense Block 2 (12 layers)
+               - Transition Layer 2
+               - Dense Block 3 (24 layers)
+               - Transition Layer 3
+               - Dense Block 4 (16 layers)
+            4. Global Average Pooling
+            5. Fully Connected Layer
+            6. Sigmoid activation (multi-label output)
+            """
+        )
+
+    with col2:
+        # Display an ASCII art diagram of the architecture
+        st.code("""
+        Input Image (224x224)
+            │
+            ▼
+        Convolution + Pooling
+            │
+            ▼
+        ┌─────────────────┐
+        │  Dense Block 1  │
+        │   (6 layers)    │
+        └─────────────────┘
+            │
+            ▼
+        Transition Layer 1
+            │
+            ▼
+        ┌─────────────────┐
+        │  Dense Block 2  │
+        │   (12 layers)   │
+        └─────────────────┘
+            │
+            ▼
+        Transition Layer 2
+            │
+            ▼
+        ┌─────────────────┐
+        │  Dense Block 3  │
+        │   (24 layers)   │
+        └─────────────────┘
+            │
+            ▼
+        Transition Layer 3
+            │
+            ▼
+        ┌─────────────────┐
+        │  Dense Block 4  │
+        │   (16 layers)   │
+        └─────────────────┘
+            │
+            ▼
+        Global Average Pooling
+            │
+            ▼
+        Fully Connected Layer
+            │
+            ▼
+        Sigmoid Activation
+            │
+            ▼
+        Disease Predictions
+        """)
+
+    # Add a load button
+    if st.button("Load DenseNet121 Model"):
+        with st.spinner("Loading DenseNet121..."):
+            if load_model("DenseNet121"):
+                st.success("✅ DenseNet121 loaded successfully!")
+            else:
+                st.error("❌ Failed to load DenseNet121. Please try again.")
+
+def about_resnet_model_page():
+    # ... (previous code)
+
+    # Visualization of a residual block
+    st.markdown("#### Residual Block Structure")
+    st.code("""
+         Input
+           │
+    ┌──────┴──────┐
+    │             │
+    ▼             │
+    Conv          │
+    │             │
+    ▼             │
+    BatchNorm     │
+    │             │
+    ▼             │
+    ReLU          │
+    │             │
+    ▼             │
+    Conv          │
+    │             │
+    ▼             │
+    BatchNorm     │
+    │             │
+    └──────┬──────┘
+           │
+           ▼
+         Add
+           │
+           ▼
+         ReLU
+           │
+           ▼
+        Output
+    """)
+
+    # Add a load button
+    if st.button("Load ResNet50 Model"):
+        with st.spinner("Loading ResNet50..."):
+            if load_model("ResNet50"):
+                st.success("✅ ResNet50 loaded successfully!")
+            else:
+                st.error("❌ Failed to load ResNet50. Please try again.")
+
+def about_chexpert_model_page():
+    st.title("🧠 About CheXpert Model")
+
+    st.markdown(
+        """
+        ## CheXpert: Stanford's Chest X-ray Interpretation Model
+
+        **CheXpert** is a deep learning model for chest X-ray interpretation developed at Stanford University.
+        It was trained on the CheXpert dataset, one of the largest publicly available chest X-ray datasets.
+
+        ### The CheXpert Dataset
+
+        - 224,316 chest radiographs from 65,240 patients
+        - Collected from Stanford Hospital between 2002-2017
+        - Labels extracted from radiology reports using natural language processing
+        - 14 common chest radiographic observations including support devices
+
+        ### Model Design
+
+        The CheXpert model implemented here via TorchXRayVision:
+
+        - Uses a DenseNet121 backbone architecture
+        - Trained specifically on chest radiographs (not transferred from natural images)
+        - Handles the uncertainty in radiology reports with a specialized labeling policy
+        - Optimized for multi-label classification of 14 findings
+
+        ### Unique Training Approach
+
+        CheXpert uses an innovative approach to handle uncertain labels:
+
+        - Labels are extracted from reports as **positive**, **negative**, or **uncertain**
+        - Uncertain labels are treated with a special policy (either ignored, treated as negative, or treated as positive)
+        - This approach addresses the inherent uncertainty in radiological reports
+
+        ### Performance Benchmarks
+
+        In the original study, CheXpert achieved:
+
+        - Radiologist-level performance on 5 pathologies: atelectasis, cardiomegaly, consolidation, edema, and pleural effusion
+        - ROC-AUC > 0.90 for cardiomegaly and edema
+        - ROC-AUC > 0.85 for pleural effusion and consolidation
+
+        ### Integration Details
+
+        This implementation uses:
+
+        - Pre-trained weights from TorchXRayVision library
+        - DenseNet121 architecture with 224×224 resolution
+        - Standard chest X-ray preprocessing with normalization
+        - No further fine-tuning required
+
+        ### Research Citation
+
+        > Irvin, J., Rajpurkar, P., Ko, M., Yu, Y., Ciurea-Ilcus, S., Chute, C., Marklund, H., Haghgoo, B., Ball, R., Shpanskaya, K., Seekins, J., Mong, D.A., Halabi, S.S., Sandberg, J.K., Jones, R., Larson, D.B., Langlotz, C.P., Patel, B.N., Lungren, M.P., & Ng, A.Y. (2019). CheXpert: A Large Chest Radiograph Dataset with Uncertainty Labels and Expert Comparison. Proceedings of the AAAI Conference on Artificial Intelligence, 33, 590-597.
+        """
+    )
+
+    # Display information about pathologies
+    st.markdown("### Pathologies Detected")
+
+    pathologies = xrv.datasets.default_pathologies
+
+    # Create a more visual display of pathologies
+    num_columns = 3
+    col_list = st.columns(num_columns)
+
+    for i, pathology in enumerate(pathologies):
+        col_index = i % num_columns
+        with col_list[col_index]:
+            st.markdown(f"✓ **{pathology}**")
+
+    # Add a load button
+    if st.button("Load CheXpert Model"):
+        with st.spinner("Loading CheXpert..."):
+            if load_model("CheXpert"):
+                st.success("✅ CheXpert model loaded successfully!")
+            else:
+                st.error("❌ Failed to load CheXpert model. Please try again.")
+
+def about_mimic_model_page():
+    st.title("🧠 About MIMIC-CXR Model")
+
+    st.markdown(
+        """
+        ## MIMIC-CXR: MIT's Chest X-ray Model for Diverse Populations
+
+        **MIMIC-CXR** is a deep learning model trained on the MIMIC-CXR dataset, a large publicly available
+        dataset of chest X-rays from the Beth Israel Deaconess Medical Center in Boston, collected from 2011-2016.
+
+        ### The MIMIC-CXR Dataset
+
+        - Over 377,000 chest X-rays from more than 65,000 patients
+        - Demographically diverse patient population from urban hospital setting
+        - Free-text radiology reports with structured labels
+        - Developed by MIT Lab for Computational Physiology
+
+        ### Model Architecture
+
+        The MIMIC-CXR model implemented via TorchXRayVision:
+
+        - DenseNet121 backbone architecture
+        - Native training on chest X-rays (not transferred from natural images)
+        - 224×224 pixel input resolution
+        - Multi-label classification across 14 common findings
+
+        ### Training Process and Optimization
+
+        - Labels extracted via the CheXpert labeler for consistency
+        - Trained using a weighted binary cross-entropy loss
+        - Optimization via Adam optimizer with learning rate scheduling
+        - Data augmentation to improve generalization
+
+        ### Clinical Relevance
+
+        MIMIC-CXR is particularly valuable for:
+
+        - Applications requiring good performance across diverse demographics
+        - Clinical settings similar to urban hospital environments
+        - Research on algorithmic fairness in medical AI
+        - Longitudinal patient studies (dataset includes multiple studies per patient)
+
+        ### Model Advantages
+
+        - Strong performance across diverse patient demographics
+        - Good generalization to external datasets
+        - Public availability through TorchXRayVision
+        - Consistent labeling with CheXpert for comparability
+
+        ### Research Citation
+
+        > Johnson, A., Pollard, T., Mark, R., Berkowitz, S., & Horng, S. (2019). MIMIC-CXR Database (version 2.0.0). PhysioNet. https://doi.org/10.13026/C2JT1Q.
+
+        > Johnson, A.E.W., Pollard, T.J., Berkowitz, S.J. et al. MIMIC-CXR, a de-identified publicly available database of chest radiographs with free-text reports. Sci Data 6, 317 (2019). https://doi.org/10.1038/s41597-019-0322-0
+        """
+    )
+
+    # Display information about pathologies
+    st.markdown("### Pathologies Detected")
+
+    pathologies = xrv.datasets.default_pathologies
+
+    # Create a more visual display of pathologies
+    num_columns = 3
+    col_list = st.columns(num_columns)
+
+    for i, pathology in enumerate(pathologies):
+        col_index = i % num_columns
+        with col_list[col_index]:
+            st.markdown(f"✓ **{pathology}**")
+
+    # Add a load button
+    if st.button("Load MIMIC-CXR Model"):
+        with st.spinner("Loading MIMIC-CXR..."):
+            if load_model("MIMIC-CXR"):
+                st.success("✅ MIMIC-CXR model loaded successfully!")
+            else:
+                st.error("❌ Failed to load MIMIC-CXR model. Please try again.")
+
+def importance_gender_bias_page():
+    st.title("📚 The Importance of Gender Bias")
+
+    st.markdown(
+        """
+        ## Why Addressing Gender Bias in Medical AI Matters
+
+        Gender bias in AI systems used for medical diagnosis can have significant real-world impacts on patient care and outcomes.
+
+        ### Ethical Imperatives
+
+        - **Fairness and Justice**: Healthcare systems should provide equal quality of care to all patients regardless of gender
+        - **Non-maleficence**: AI systems should not cause harm by systematically misdiagnosing particular demographic groups
+        - **Transparency**: Users of AI systems should understand potential biases and limitations
+
+        ### Clinical Impact
+
+        - **Diagnostic Disparities**: Biased models may miss diseases that present differently across genders
+        - **Treatment Delays**: False negatives can lead to delayed treatment for vulnerable populations
+        - **Resource Allocation**: Biased prioritization can affect access to limited healthcare resources
+
+        ### Regulatory Requirements
+
+        - **FDA Guidance**: Emerging regulations on AI in healthcare require fairness considerations
+        - **Legal Liability**: Healthcare institutions may face liability for deploying biased systems
+        - **Equal Treatment Mandates**: Many jurisdictions legally require equitable healthcare provision
+        """
+    )
+
+    st.markdown("### Key Research on Gender Bias in AI Healthcare")
+
+    research = [
+        {
+            "title": "A survey on bias and fairness in machine learning",
+            "authors": "Mehrabi et al. (2021)",
+            "findings": "Comprehensive review of various types of biases that can affect ML systems, including those in healthcare"
+        },
+        {
+            "title": "Dissecting racial bias in an algorithm used to manage the health of populations",
+            "authors": "Obermeyer et al. (2019)",
+            "findings": "Found that a widely used algorithm exhibited significant racial bias, underestimating the needs of Black patients"
+        },
+        {
+            "title": "Gender imbalance in medical imaging datasets produces biased classifiers for computer-aided diagnosis",
+            "authors": "Larrazabal et al. (2020)",
+            "findings": "Demonstrated that gender imbalances in training data lead to significant performance disparities by gender"
+        }
+    ]
+
+    for i, paper in enumerate(research):
+        with st.expander(f"{i+1}. {paper['title']} ({paper['authors']})"):
+            st.markdown(f"**Key Findings:** {paper['findings']}")
+
+    st.markdown("### Mitigation Strategies")
+
+    st.markdown(
+        """
+        Several approaches can help address gender bias in medical AI:
+
+        1. **Data Representation**: Ensure diverse and balanced training datasets
+        2. **Algorithmic Techniques**: Apply technical bias mitigation methods (as demonstrated in this app)
+        3. **Evaluation Protocols**: Test models across demographic subgroups before deployment
+        4. **Continuous Monitoring**: Track performance disparities in real-world usage
+        5. **Stakeholder Inclusion**: Involve diverse clinicians and patients in development
+        """
+    )
+
+def project_overview_page():
+    st.title("📈 Project Overview")
+
+    st.markdown(
+        """
+        ## Project Objective
+
+        This application is designed to help healthcare organizations and AI developers detect and mitigate gender bias in chest X-ray interpretation models. Our goal is to ensure that AI tools in radiology deliver equitable performance across all patient demographics.
+
+        ### Key Features
+
+        1. **Data Exploration**: Upload and analyze medical imaging datasets
+        2. **Multiple AI Models**: Compare performance across state-of-the-art chest X-ray models
+        3. **Bias Detection**: Quantify gender disparities in model predictions
+        4. **Mitigation Techniques**: Apply and evaluate various bias mitigation approaches
+        5. **Explainable Analysis**: Understand the patterns behind model errors and bias
+
+        ### Impact
+
+        - **Clinical Safety**: Reduce misdiagnosis risks for underrepresented groups
+        - **Regulatory Compliance**: Meet emerging requirements for AI fairness
+        - **Improved Accessibility**: Make advanced AI diagnostics safe for all patients
+        """
+    )
+
+    st.markdown("### Project Workflow")
+
+    workflow_steps = [
+        "Upload and analyze dataset",
+        "Explore data characteristics and demographics",
+        "Select and run AI models for disease prediction",
+        "Analyze gender bias in model predictions",
+        "Apply bias mitigation techniques",
+        "Test and validate mitigation effectiveness"
+    ]
+
+    for i, step in enumerate(workflow_steps):
+        st.markdown(f"**Step {i+1}:** {step}")
+
+def meet_the_team_page():
+    st.title("👥 Meet the Team")
+
+    team_members = [
+        {"name": "Yuying", "role": "Data Scientist", "image": "Yuying.webp"},
+        {"name": "Siwen", "role": "ML Engineer", "image": "Siwen.webp"},
+        {"name": "Zhi", "role": "Research Analyst", "image": "Zhi.webp"},
+        {"name": "Maude", "role": "UX Designer", "image": "Maude.webp"}
+    ]
+
+    # Create a tab for each team member
+    tabs = st.tabs([member["name"] for member in team_members])
+
+    for tab, member in zip(tabs, team_members):
+        with tab:
+            # Try to display image if available
+            try:
+                if os.path.exists(member["image"]):
+                    st.image(member["image"], width=150)
+                else:
+                    st.error(f"Image not found: {member['image']}")
+            except:
+                st.info(f"Image not available for {member['name']}")
+
+            st.write(f"**{member['name']}**")
+            st.write(f"*{member['role']}*")
 
 # Main sidebar navigation
 def main():
