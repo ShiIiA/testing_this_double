@@ -713,12 +713,10 @@ def explore_data_page():
 
             # Add percentages
             total_counts = pivot_df.sum(axis=1)
-            for
+            for col in pivot_df.columns:
+              pivot_df[f"{col}_pct"] = (pivot_df[col] / total_counts * 100).round(1)
 
-col in pivot_df.columns:
-                pivot_df[f"{col}_pct"] = (pivot_df[col] / total_counts * 100).round(1)
-
-            # Sort by total counts
+# Sort by total counts
             pivot_df = pivot_df.sort_values(by=total_counts.name, ascending=False)
 
             # Display the table
