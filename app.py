@@ -39,7 +39,7 @@ st.set_page_config(
 # ------------------------- THEME & STYLE FUNCTIONS -------------------------
 def set_background():
     st.markdown(
-        \"\"\"
+
         <style>
         .stApp {
             background: linear-gradient(to bottom right, #ffffff, #e6f7ff);
@@ -51,7 +51,7 @@ def set_background():
             color: #000 !important;
         }
         </style>
-        \"\"\", unsafe_allow_html=True
+        , unsafe_allow_html=True
     )
 set_background()
 
