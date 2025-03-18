@@ -1005,7 +1005,7 @@ def bias_mitigation_simulation_page():
         df_results_clean["Mitigated_Prediction"] = df_results_clean.apply(
             lambda row: 1 if (row["Gender"] == "F" and row["Binary_Prediction"] == 1 and np.random.random() <= female_adj) or
                               (row["Gender"] == "M" and row["Binary_Prediction"] == 1 and np.random.random() <= male_adj)
-                       else 0,
+                          else 0,
             axis=1
         )
 
