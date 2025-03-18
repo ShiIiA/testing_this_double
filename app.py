@@ -9,12 +9,13 @@ Original file is located at
 
 import os
 import logging
-import subprocess
 import tempfile
 import warnings
 import streamlit as st
 import pandas as pd
 import numpy as np
+import altair as alt
+import plotly.express as px
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,59 +23,78 @@ import torchvision.models as models
 import torchvision.transforms as transforms
 from PIL import Image
 from fairlearn.metrics import demographic_parity_difference, equalized_odds_difference
-from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score
+from sklearn.metrics import confusion_matrix, accuracy_score
 from torchvision.models import DenseNet121_Weights
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Suppress meta parameter warnings
+warnings.filterwarnings("ignore", message=".*meta parameter.*")
 
 # ------------------------- Logging Configuration -------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ------------------------- PAGE CONFIGURATION -------------------------
+# ------------------------- Page Configuration -------------------------
 st.set_page_config(
     page_title="Gender Bias in Radiology",
     page_icon="🐍",
     layout="wide"
 )
 
-# ------------------------- MODEL LOADING FUNCTIONS -------------------------
+# ------------------------- Theme & Style Functions -------------------------
+def set_styles():
+    st.markdown(
+        """
+        <style>
+        .stApp {background: linear-gradient(to bottom right, #ffffff, #e6f7ff); color: #000;}
+        .stTitle {font-size: 36px !important; font-weight: bold; color: #000 !important;}
+        div[data-testid="stProgressBar"] > div[role="progressbar"] > div {
+            background: linear-gradient(to right, #4facfe, #00f2fe);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+set_styles()
+
+# ------------------------- Global Session State -------------------------
+if "df" not in st.session_state:
+    st.session_state.df = None
+if "df_results" not in st.session_state:
+    st.session_state.df_results = pd.DataFrame(columns=["Image_ID", "Gender", "Prediction", "Probability"])
+if "chexagent_loaded" not in st.session_state:
+    st.session_state.chexagent_loaded = False
+if "device" not in st.session_state:
+    st.session_state.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ------------------------- Model Loading Functions -------------------------
 @st.cache_resource(show_spinner=True)
 def load_chexnet_model():
     model = models.densenet121(weights=DenseNet121_Weights.IMAGENET1K_V1)
     model.classifier = nn.Linear(1024, 2)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
+    model = model.to(st.session_state.device)
     model.eval()
-    return model, device
+    return model
 
 try:
-    chexnet_model, device = load_chexnet_model()
+    chexnet_model = load_chexnet_model()
     st.sidebar.success("✅ CheXNet Model Loaded Successfully!")
 except Exception as e:
     logging.error("Error loading CheXNet model", exc_info=True)
     st.sidebar.error(f"🚨 Error loading CheXNet model: {e}")
 
-# ------------------------- CHEXAGENT INFERENCE FUNCTION -------------------------
-def chexagent_inference(image, prompt="Analyze the X-ray and return the detected disease."):
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            image.save(tmp.name)
-            tmp_path = tmp.name
+@st.cache_resource(show_spinner=True)
+def load_chexagent():
+    if not st.session_state.chexagent_loaded:
+        model_name = "StanfordAIMI/CheXagent-2-3b"
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cpu", trust_remote_code=True).eval()
+        st.session_state.chexagent_model = model
+        st.session_state.chexagent_tokenizer = tokenizer
+        st.session_state.chexagent_loaded = True
+    return st.session_state.chexagent_model, st.session_state.chexagent_tokenizer
 
-        result = subprocess.run(
-            ["python", "chexagent_worker.py", tmp_path, prompt],
-            capture_output=True, text=True
-        )
-        os.remove(tmp_path)
-
-        if result.returncode != 0:
-            st.error("CheXagent Worker Error: " + result.stderr)
-            raise Exception("Worker failed with error: " + result.stderr)
-
-        return result.stdout.strip()
-    except Exception as ex:
-        logging.error("CheXagent inference error", exc_info=True)
-        raise ex
-
-# ------------------------- IMAGE PREPROCESSING FUNCTION -------------------------
+# ------------------------- Image Processing -------------------------
 @st.cache_resource(show_spinner=True)
 def preprocess_image(image):
     transform = transforms.Compose([
@@ -83,54 +103,46 @@ def preprocess_image(image):
     ])
     return transform(image).unsqueeze(0)
 
-# ------------------------- MODEL PREDICTION FUNCTION -------------------------
+# ------------------------- Model Prediction -------------------------
 def predict_with_models(image):
-    """
-    Runs inference using both CheXNet and CheXagent models and returns their predictions.
-    """
     results = {}
 
     # CheXNet Prediction
-    tensor_img = preprocess_image(image)
-    tensor_img = tensor_img.to(device)
+    tensor_img = preprocess_image(image).to(st.session_state.device)
     with torch.no_grad():
         logits = chexnet_model(tensor_img)
         probs = F.softmax(logits, dim=1)
         disease_prob = probs[0, 1].item()
-        predicted_binary = 1 if disease_prob >= 0.5 else 0
-    results["CheXNet"] = ("Disease Detected" if predicted_binary else "No Disease", disease_prob)
+        results["CheXNet"] = ("Disease Detected" if disease_prob >= 0.5 else "No Disease", disease_prob)
 
     # CheXagent Prediction
     try:
-        chexagent_response = chexagent_inference(image)
-        results["CheXagent"] = (chexagent_response, None)  # CheXagent outputs text
+        model, tokenizer = load_chexagent()
+        prompt = "Analyze the X-ray and return the detected disease."
+        query = tokenizer.from_list_format([{"image": image}, {"text": prompt}])
+        input_ids = tokenizer.apply_chat_template([{"from": "human", "value": query}], return_tensors="pt")
+        output = model.generate(input_ids, max_new_tokens=128)[0]
+        results["CheXagent"] = (tokenizer.decode(output[input_ids.size(1):-1]), None)
     except Exception as e:
         results["CheXagent"] = ("Error", None)
 
     return results
 
-# ------------------------- GENDER BIAS ANALYSIS -------------------------
+# ------------------------- Gender Bias Analysis -------------------------
 def analyze_bias(df_results, df_truth, disease_col, image_col):
-    """
-    Compares model predictions with ground truth and computes bias metrics.
-    """
-    df_truth[disease_col] = df_truth[disease_col].str.lower().str.strip()
-    merged = pd.merge(df_results, df_truth[[image_col, disease_col]], how="left", left_on="Image_ID", right_on=image_col)
-    merged = merged.rename(columns={disease_col: "True_Label"})
-    merged["Correct"] = merged["Prediction"].str.lower().str.strip() == merged["True_Label"].str.lower().str.strip()
+    merged = pd.merge(df_results, df_truth[[image_col, disease_col]], left_on="Image_ID", right_on=image_col)
+    merged["Correct"] = merged["Prediction"].str.lower().str.strip() == merged[disease_col].str.lower().str.strip()
 
-    # Compute fairness metrics
     demographic_parity = demographic_parity_difference(merged["Correct"], sensitive_features=merged["Gender"])
     equalized_odds = equalized_odds_difference(merged["Correct"], sensitive_features=merged["Gender"])
 
     return merged, demographic_parity, equalized_odds
 
-# ------------------------- STREAMLIT PAGE: MODEL COMPARISON -------------------------
+# ------------------------- Streamlit Pages -------------------------
 def model_comparison_page():
     st.title("🤖 Model Comparison")
-    st.markdown("Upload chest X-rays and compare predictions from CheXNet and CheXagent.")
+    uploaded_images = st.file_uploader("Upload X-ray Images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
-    uploaded_images = st.file_uploader("Upload X‑ray Images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
     if uploaded_images:
         for img in uploaded_images:
             image = Image.open(img).convert("RGB")
@@ -138,18 +150,13 @@ def model_comparison_page():
 
             # Run Predictions
             results = predict_with_models(image)
-            chexnet_pred, chexnet_prob = results["CheXNet"]
-            chexagent_pred, _ = results["CheXagent"]
+            st.write(f"**CheXNet Prediction:** {results['CheXNet'][0]} | **Probability:** {results['CheXNet'][1]:.2%}")
+            st.write(f"**CheXagent Prediction:** {results['CheXagent'][0]}")
 
-            st.write(f"**CheXNet Prediction:** {chexnet_pred} | **Probability:** {chexnet_prob:.2%}")
-            st.write(f"**CheXagent Prediction:** {chexagent_pred}")
-
-# ------------------------- STREAMLIT PAGE: GENDER BIAS ANALYSIS -------------------------
 def gender_bias_analysis_page():
     st.title("⚖️ Gender Bias Analysis")
-
     df_results = st.session_state.get("df_results", pd.DataFrame(columns=["Image_ID", "Gender", "Prediction"]))
-    df_truth = st.session_state.get("df_truth", None)
+    df_truth = st.session_state.get("df", None)
 
     if df_truth is None or df_results.empty:
         st.info("Upload images and ground truth labels first.")
@@ -165,7 +172,7 @@ def gender_bias_analysis_page():
         st.write(f"**Demographic Parity Difference:** {demographic_parity:.4f}")
         st.write(f"**Equalized Odds Difference:** {equalized_odds:.4f}")
 
-# ------------------------- SIDEBAR NAVIGATION -------------------------
+# ------------------------- Sidebar Navigation -------------------------
 st.sidebar.title("Navigation")
 selected_page = st.sidebar.radio("Go to", ["🤖 Model Comparison", "⚖️ Gender Bias Analysis"])
 
