@@ -12,6 +12,7 @@ import io
 import logging
 import tempfile
 import warnings  # to suppress warnings
+import subprocess
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -103,46 +104,23 @@ except Exception as e:
     logging.error("Error loading CheXNet model", exc_info=True)
     st.error(f"🚨 Error loading CheXNet model: {e}")
 
-@st.cache_resource(show_spinner=True)
-def load_chexagent_model():
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    model_name = "StanfordAIMI/CheXagent-2-3b"
-    dtype = torch.bfloat16
-    # Force CheXagent to load on CPU to help reduce memory issues.
-    device_agent = "cpu"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cpu", trust_remote_code=True)
-    model = model.to(dtype)
-    model.eval()
-    return model, tokenizer, device_agent
-
 def chexagent_inference(image, prompt="Analyze the chest X‑ray image and return what you see along with the disease name detected."):
     try:
         # Save image temporarily.
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             image.save(tmp.name)
             tmp_path = tmp.name
-        model_agent, tokenizer, device_agent = load_chexagent_model()
-        query = tokenizer.from_list_format([{'image': tmp_path}, {'text': prompt}])
-        conv = [
-            {"from": "system", "value": "You are a helpful assistant."},
-            {"from": "human", "value": query}
-        ]
-        input_ids = tokenizer.apply_chat_template(conv, add_generation_prompt=True, return_tensors="pt")
-        output = model_agent.generate(
-            input_ids.to(device_agent),
-            do_sample=False,
-            num_beams=1,
-            temperature=1.0,
-            top_p=1.0,
-            use_cache=True,
-            max_new_tokens=128  # Reduced for memory usage.
-        )[0]
-        response = tokenizer.decode(output[input_ids.size(1):-1])
+        # Call the separate worker script and pass the image path and prompt.
+        # (Ensure chexagent_worker.py is in the same directory as this app.)
+        result = subprocess.run(
+            ["python", "chexagent_worker.py", tmp_path, prompt],
+            capture_output=True, text=True, check=True
+        )
         os.remove(tmp_path)
-        return response
+        return result.stdout.strip()
     except Exception as ex:
         logging.error("CheXagent inference error", exc_info=True)
+        os.remove(tmp_path)
         raise ex
 
 def unify_gender_label(label):
@@ -280,7 +258,6 @@ def explore_data_page():
             if filtered_df.empty:
                 st.info("No records found for the selected disease category.")
             else:
-                # Pre-aggregate gender counts for the pie chart.
                 gender_counts = filtered_df[gender_header].value_counts().reset_index()
                 gender_counts.columns = [gender_header, "Count"]
                 pie_chart = px.pie(
@@ -292,11 +269,9 @@ def explore_data_page():
                     color_discrete_map={"F": "pink", "M": "blue"},
                     hover_data=["Count"]
                 )
-                # Show percentage inside slices.
                 pie_chart.update_traces(texttemplate='%{percent:.1%}', textposition='inside')
                 st.plotly_chart(pie_chart, use_container_width=True)
 
-            # Add a slider to limit the sample size for the pivot table.
             sample_size = st.slider("Select number of rows for pivot table", min_value=100, max_value=len(df), value=min(1000, len(df)))
             df_sample = df.head(sample_size)
             pivot_df = pd.pivot_table(df_sample, index=disease_header, columns=gender_header, aggfunc='size', fill_value=0)
@@ -609,7 +584,7 @@ def interactive_demos_page():
             probs = F.softmax(logits, dim=1)
             chexnet_prob = probs[0, 1].item()
             chexnet_pred = "Disease Detected" if chexnet_prob >= 0.5 else "No Disease"
-        # CheXagent prediction using our inference function.
+        # CheXagent prediction using our separate worker.
         prompt = "Analyze the chest X‑ray image and return what you see along with the disease name detected."
         chexagent_response = chexagent_inference(image, prompt=prompt)
         st.markdown("### CheXNet Prediction")
