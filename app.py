@@ -8,7 +8,6 @@ Original file is located at
 """
 
 import os
-import io
 import logging
 import warnings
 import streamlit as st
@@ -43,6 +42,8 @@ if "model_loaded" not in st.session_state:
     st.session_state.model_loaded = False
 if "device" not in st.session_state:
     st.session_state.device = "cpu"
+if "chexnet_model" not in st.session_state:
+    st.session_state.chexnet_model = None
 
 # ------------------------- UPLOAD DATASET -------------------------
 st.title("📂 Upload Medical Dataset")
@@ -59,14 +60,17 @@ if uploaded_file:
         st.session_state.gender_col = st.selectbox("Select Gender Column", df.columns.tolist())
         st.session_state.disease_col = st.selectbox("Select Disease Column", df.columns.tolist())
 
+        # Convert all disease column values to string to avoid type errors
+        df[st.session_state.disease_col] = df[st.session_state.disease_col].astype(str)
+
         # Extract unique disease values dynamically
         disease_classes = df[st.session_state.disease_col].dropna().unique().tolist()
-        st.session_state.disease_classes = sorted(disease_classes)
+        st.session_state.disease_classes = sorted(map(str, disease_classes))  # Convert to string
 
         if not disease_classes:
             st.warning("⚠️ No diseases detected in the selected column.")
         else:
-            st.success(f"✅ Detected {len(disease_classes)} diseases: {', '.join(disease_classes)}")
+            st.success(f"✅ Detected {len(disease_classes)} diseases: {', '.join(st.session_state.disease_classes)}")
 
     except Exception as e:
         logging.error("Error loading file", exc_info=True)
@@ -85,9 +89,8 @@ def load_chexnet_model(num_classes):
 if st.session_state.disease_classes:
     num_classes = len(st.session_state.disease_classes)
     if not st.session_state.model_loaded:
-        chexnet_model, device = load_chexnet_model(num_classes)
+        st.session_state.chexnet_model, st.session_state.device = load_chexnet_model(num_classes)
         st.session_state.model_loaded = True
-        st.session_state.device = device
         st.success("✅ Model Loaded Successfully!")
 
 # ------------------------- PREPROCESS IMAGE -------------------------
@@ -104,9 +107,13 @@ def predict_disease(image):
         st.error("❌ No diseases detected from dataset. Please upload a dataset with disease labels.")
         return None, None
 
+    if not st.session_state.chexnet_model:
+        st.error("❌ Model is not loaded yet.")
+        return None, None
+
     tensor_img = preprocess_image(image).to(st.session_state.device)
     with torch.no_grad():
-        logits = chexnet_model(tensor_img)
+        logits = st.session_state.chexnet_model(tensor_img)
         probs = F.softmax(logits, dim=1)  # Multi-class probabilities
 
         # Dynamically assign labels
