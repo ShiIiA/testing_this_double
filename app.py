@@ -173,6 +173,3 @@ elif selected_page == "👥 Meet the Team":
 # Save the fixed and optimized app script
 with open(fixed_app_path, "w") as f:
     f.write(fixed_app_code)
-
-# Provide the fixed file to the user
-fixed_app_path
