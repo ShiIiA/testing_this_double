@@ -17,3 +17,5 @@ opencv-python-headless==4.9.0.80
 open-clip-torch==2.20.0
 watchdog==3.0.0
 openai==0.28.0
+albumentations 
+einops

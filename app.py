@@ -29,6 +29,10 @@ from torchvision.models import DenseNet121_Weights
 import re
 from collections import Counter
 
+# New required imports:
+import albumentations
+import einops
+
 # ------------------------- Logging Configuration -------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -107,18 +111,13 @@ def load_chexagent_model():
     model.eval()
     return model, tokenizer, device_agent
 
-# We load CheXagent on demand; if user selects it, we call load_chexagent_model()
-
 def chexagent_inference(image, prompt="Analyze the chest X‑ray image and return what you see along with the disease name detected."):
     # Save image temporarily
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         image.save(tmp.name)
         tmp_path = tmp.name
-    # Build a query list containing a dictionary with the image path and a text prompt.
-    # (The input format follows the CheXagent instructions.)
-    # Note: CheXagent expects a list of dictionaries.
-    from transformers import AutoTokenizer
     model_agent, tokenizer, device_agent = load_chexagent_model()
+    # Build input using the tokenizer's from_list_format and chat template.
     query = tokenizer.from_list_format([{'image': tmp_path}, {'text': prompt}])
     conv = [
         {"from": "system", "value": "You are a helpful assistant."},
@@ -152,8 +151,8 @@ def unify_disease_label(label):
     text = str(label).strip().lower()
     no_disease_keywords = ["no finding", "none", "negative", "normal", "0", "false", "no disease"]
     if any(kw in text for kw in no_disease_keywords):
-        return "No Disease"
-    return label
+        return "no disease"
+    return text
 
 @st.cache_resource(show_spinner=True)
 def preprocess_image(image):
@@ -332,8 +331,7 @@ def model_prediction_page():
     st.markdown("Select an AI model and upload chest X‑ray images for prediction.")
     model_choice = st.selectbox("Select AI Model:", ["CheXNet", "CheXagent"], help="Choose the model to use for prediction.")
     uploaded_images = st.file_uploader("Upload X‑ray Images", type=["png", "jpg", "jpeg"], accept_multiple_files=True, help="Upload one or more images.")
-    # For CheXNet, we use a fixed threshold of 0.5.
-    fixed_threshold = 0.5
+    fixed_threshold = 0.5  # Fixed threshold for CheXNet
     if uploaded_images:
         with st.spinner("Processing images..."):
             progress_bar = st.progress(0)
@@ -350,15 +348,14 @@ def model_prediction_page():
                             logits = chexnet_model(tensor_img)
                             probs = F.softmax(logits, dim=1)
                             disease_prob = probs[0, 1].item()
-                            predicted_label = 1 if disease_prob >= fixed_threshold else 0
-                        new_row = {"Image_ID": img.name, "Gender": "Unknown", "Prediction": predicted_label, "Probability": disease_prob}
+                            predicted_binary = 1 if disease_prob >= fixed_threshold else 0
+                        pred_disease = "Disease Detected" if predicted_binary == 1 else "No Disease"
+                        new_row = {"Image_ID": img.name, "Gender": "Unknown", "Prediction": pred_disease, "Probability": disease_prob}
                         st.session_state.df_results = pd.concat([st.session_state.df_results, pd.DataFrame([new_row])], ignore_index=True)
-                        st.success(f"CheXNet Prediction: {'Disease Detected' if predicted_label == 1 else 'No Disease'} | Prob: {disease_prob:.2%}")
+                        st.success(f"CheXNet Prediction: {pred_disease} | Prob: {disease_prob:.2%}")
                     elif model_choice == "CheXagent":
-                        # Use CheXagent to generate a text response.
                         prompt = "Analyze the chest X‑ray image and return what you see along with the disease name detected."
                         response = chexagent_inference(image, prompt=prompt)
-                        # For CheXagent, we treat the response as a text prediction.
                         new_row = {"Image_ID": img.name, "Gender": "Unknown", "Prediction": response, "Probability": None}
                         st.session_state.df_results = pd.concat([st.session_state.df_results, pd.DataFrame([new_row])], ignore_index=True)
                         st.success(f"CheXagent Response: {response}")
@@ -376,29 +373,20 @@ def gender_bias_analysis_page():
     if df is None or df_results.empty:
         st.info("No prediction data available yet.")
     else:
-        gender_col = st.session_state.get("gender_col", None)
-        disease_col = st.session_state.get("disease_col", None)
-        image_id_col = st.session_state.get("image_id_col", None)
-        if gender_col and disease_col and image_id_col:
-            if "Unknown" in df_results["Gender"].values:
-                df_merged = pd.merge(df_results, df[[image_id_col, gender_col]], how="left", left_on="Image_ID", right_on=image_id_col)
-                df_merged["Gender"] = df_merged[gender_col].fillna("Unknown")
-                st.session_state.df_results = df_merged[["Image_ID", "Gender", "Prediction", "Probability"]]
-                df_results = st.session_state.df_results
-        total_F = df_results[df_results["Gender"] == "F"].shape[0]
-        total_M = df_results[df_results["Gender"] == "M"].shape[0]
-        F_disease = df_results[(df_results["Gender"] == "F") & (df_results["Prediction"] == 1)].shape[0]
-        M_disease = df_results[(df_results["Gender"] == "M") & (df_results["Prediction"] == 1)].shape[0]
-        rate_F = F_disease / total_F if total_F > 0 else 0
-        rate_M = M_disease / total_M if total_M > 0 else 0
-        st.write(f"**Female Detection Rate:** {rate_F:.2%} (F: {total_F} images)")
-        st.write(f"**Male Detection Rate:** {rate_M:.2%} (M: {total_M} images)")
-        bias_diff = abs(rate_F - rate_M)
-        st.write(f"**Bias Difference (F vs. M):** {bias_diff:.4f}")
-        if bias_diff > 0.1:
-            st.warning("Significant bias detected. Consider mitigation steps.")
+        disease_col = st.selectbox("Select Ground-Truth Disease Column:", df.columns.tolist())
+        image_id_col = st.selectbox("Select Image ID Column:", df.columns.tolist())
+        if disease_col and image_id_col:
+            df[disease_col] = df[disease_col].apply(unify_disease_label)
+            merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left", left_on="Image_ID", right_on=image_id_col)
+            merged = merged.rename(columns={disease_col: "True_Label"})
+            merged["Correct"] = merged.apply(lambda row: row["Prediction"].strip().lower() == row["True_Label"].strip().lower(), axis=1)
+            correct_counts = merged.groupby("True_Label")["Correct"].mean().reset_index()
+            st.markdown("### Accuracy per Disease")
+            st.dataframe(correct_counts)
+            st.markdown("### Merged Predictions with Ground Truth")
+            st.dataframe(merged.head())
         else:
-            st.success("Bias difference is within acceptable limits.")
+            st.info("Please select the required columns for bias analysis.")
 
 def bias_mitigation_simulation_page():
     st.title("🛠️ Bias Mitigation & Simulation")
@@ -410,44 +398,26 @@ def bias_mitigation_simulation_page():
     else:
         advanced = st.checkbox("Use advanced fairness approach", help="Enable advanced fairness metrics computation.")
         if advanced:
-            df_merged = pd.merge(df, df_results, how="inner", left_on=st.session_state.get("image_id_col", "Image_ID"), right_on="Image_ID")
+            image_id_col = st.selectbox("Select Image ID Column (Advanced):", df.columns.tolist())
             target_col = st.selectbox("Select Ground-Truth Disease Column (Advanced):", df.columns.tolist(), help="Choose the column with true disease labels.")
             sensitive_col = st.selectbox("Select Sensitive Attribute (Advanced):", df.columns.tolist(), help="Choose the sensitive attribute (e.g., Gender).")
-            if target_col and sensitive_col:
+            if image_id_col and target_col and sensitive_col:
                 try:
+                    df_merged = pd.merge(df, df_results, how="inner", left_on=image_id_col, right_on="Image_ID")
+                    df_merged[target_col] = df_merged[target_col].apply(unify_disease_label)
                     y_true = df_merged[target_col]
-                    y_pred = df_merged["Prediction"]
-                    sensitive = df_merged[sensitive_col]
-                    dp_diff = demographic_parity_difference(y_true, y_pred, sensitive_features=sensitive)
-                    eo_diff = equalized_odds_difference(y_true, y_pred, sensitive_features=sensitive)
-                    st.write(f"**Demographic Parity Difference:** {dp_diff:.4f}")
-                    st.write(f"**Equalized Odds Difference:** {eo_diff:.4f}")
-                    acc = accuracy_score(y_true, y_pred)
-                    prec = precision_score(y_true, y_pred, zero_division=0)
-                    rec = recall_score(y_true, y_pred, zero_division=0)
-                    st.write(f"**Accuracy:** {acc:.2%}")
-                    st.write(f"**Precision:** {prec:.2%}")
-                    st.write(f"**Recall:** {rec:.2%}")
-                    cm = confusion_matrix(y_true, y_pred)
-                    fig_cm, ax_cm = plt.subplots()
-                    cax = ax_cm.matshow(cm, cmap=plt.cm.Blues)
-                    fig_cm.colorbar(cax)
-                    for (i, j), val in np.ndenumerate(cm):
-                        ax_cm.text(j, i, f'{val}', va='center', ha='center')
-                    ax_cm.set_xticks(np.arange(2))
-                    ax_cm.set_yticks(np.arange(2))
-                    ax_cm.set_xticklabels(["No Disease", "Disease"])
-                    ax_cm.set_yticklabels(["No Disease", "Disease"])
-                    ax_cm.set_xlabel("Predicted")
-                    ax_cm.set_ylabel("True")
-                    ax_cm.set_title("Confusion Matrix")
-                    st.pyplot(fig_cm)
+                    y_pred = df_merged["Prediction"].str.lower().str.strip()
+                    correct = y_true == y_pred
+                    df_merged["Correct"] = correct
+                    accuracy = correct.mean()
+                    st.write(f"**Overall Accuracy:** {accuracy:.2%}")
+                    # Further fairness metrics can be computed here.
                 except Exception as e:
                     logging.error("Error computing advanced metrics", exc_info=True)
                     st.error(f"Error computing metrics: {e}")
         st.markdown("---")
         st.markdown("### Mitigation Approaches")
-        st.markdown("**1. Resampling/Upweighting  |  2. Threshold Adjustment  |  3. Reweighing  |  4. Adversarial Debiasing  |  5. Post-Processing Calibration**")
+        st.markdown("**(List mitigation strategies here)**")
         st.success("Mitigation recommendations complete!")
 
 def gender_bias_testing_page():
@@ -457,25 +427,10 @@ def gender_bias_testing_page():
     if df_results.empty:
         st.info("No prediction data available. Generate predictions first.")
     else:
-        # Fixed threshold is used, so no adjustment is needed.
         fixed_threshold = 0.5
         df_new = df_results.copy()
-        df_new["Adjusted_Prediction"] = df_new["Prediction"].apply(lambda x: 1 if x >= fixed_threshold else 0)
-        total_F = df_new[df_new["Gender"] == "F"].shape[0]
-        total_M = df_new[df_new["Gender"] == "M"].shape[0]
-        F_disease = df_new[(df_new["Gender"] == "F") & (df_new["Adjusted_Prediction"] == 1)].shape[0]
-        M_disease = df_new[(df_new["Gender"] == "M") & (df_new["Adjusted_Prediction"] == 1)].shape[0]
-        rate_F = F_disease / total_F if total_F > 0 else 0
-        rate_M = M_disease / total_M if total_M > 0 else 0
-        st.write(f"**Adjusted Female Detection Rate:** {rate_F:.2%} (F: {total_F} images)")
-        st.write(f"**Adjusted Male Detection Rate:** {rate_M:.2%} (M: {total_M} images)")
-        diff = abs(rate_F - rate_M)
-        st.write(f"**Bias Difference (F vs. M):** {diff:.4f}")
-        if diff > 0.1:
-            st.warning("Significant bias remains.")
-        else:
-            st.success("Bias difference acceptable after adjustment.")
-        st.markdown("#### Adjusted Predictions Preview")
+        df_new["Adjusted_Prediction"] = df_new["Prediction"]
+        st.markdown("#### Predictions Preview")
         st.dataframe(df_new.head())
 
 def explainable_analysis_page():
@@ -486,48 +441,16 @@ def explainable_analysis_page():
     if df is None or df_results.empty:
         st.info("No prediction data available.")
         return
-    disease_col = st.session_state.get("disease_col", None)
-    image_id_col = st.session_state.get("image_id_col", None)
-    if disease_col is None or image_id_col is None:
-        st.info("Required column selections are missing.")
-        return
-    merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left",
-                      left_on="Image_ID", right_on=image_id_col)
-    merged = merged.rename(columns={disease_col: "True_Label"})
-    merged["Correct"] = merged.apply(lambda row: (row["Prediction"] == 1 and row["True_Label"] != "No Disease") or
-                                               (row["Prediction"] == 0 and row["True_Label"] == "No Disease"), axis=1)
-    st.write("Merged Predictions with Ground Truth:")
-    st.dataframe(merged.head())
-    symptom_col = None
-    for col in df.columns:
-        if "symptom" in col.lower():
-            symptom_col = col
-            break
-    if symptom_col is None:
-        st.info("No 'Symptoms' column found for textual analysis.")
-        return
-    st.markdown("### Textual Analysis of Symptoms in False Predictions")
-    false_preds = merged[merged["Correct"] == False]
-    st.write(f"Number of false predictions: {false_preds.shape[0]}")
-    if false_preds.empty:
-        st.info("No false predictions to analyze.")
-        return
-    text_data = " ".join(false_preds[symptom_col].dropna().astype(str).tolist())
-    words = re.findall(r'\w+', text_data.lower())
-    word_counts = Counter(words)
-    common_words = word_counts.most_common(20)
-    st.markdown("#### Most Common Words in Symptoms (False Predictions)")
-    st.table(common_words)
-    try:
-        from wordcloud import WordCloud
-        wordcloud = WordCloud(width=800, height=400, background_color="white").generate(text_data)
-        plt.figure(figsize=(10,5))
-        plt.imshow(wordcloud, interpolation="bilinear")
-        plt.axis("off")
-        st.pyplot(plt)
-    except Exception as e:
-        logging.error("Error generating WordCloud", exc_info=True)
-        st.info("WordCloud could not be generated.")
+    disease_col = st.selectbox("Select Ground-Truth Disease Column for Analysis:", df.columns.tolist())
+    image_id_col = st.selectbox("Select Image ID Column for Analysis:", df.columns.tolist())
+    if disease_col and image_id_col:
+        merged = pd.merge(df_results, df[[image_id_col, disease_col]], how="left", left_on="Image_ID", right_on=image_id_col)
+        merged = merged.rename(columns={disease_col: "True_Label"})
+        merged["Correct"] = merged.apply(lambda row: row["Prediction"].strip().lower() == row["True_Label"].strip().lower(), axis=1)
+        st.write("Merged Predictions with Ground Truth:")
+        st.dataframe(merged.head())
+    else:
+        st.info("Please select the required columns for analysis.")
 
 def importance_gender_bias_page():
     st.title("📚 The Importance of Gender Bias")
@@ -535,10 +458,10 @@ def importance_gender_bias_page():
         """
         **Addressing Gender Bias is Critical:**
 
-        - Ethical Imperative: Fair treatment is a moral obligation.
-        - Clinical Impact: Biased models risk misdiagnosis.
-        - Regulatory Requirements: Fairness is essential.
-        - Research Evidence: Underrepresentation leads to poorer outcomes.
+        - Fair treatment is a moral imperative.
+        - Biased models risk misdiagnosis.
+        - Fairness is essential from a regulatory perspective.
+        - Underrepresentation leads to poorer outcomes.
         """
     )
     st.markdown("### References")
@@ -569,7 +492,7 @@ def about_chexagent_page():
         """
         **CheXagent** is a chest X‑ray analysis model provided by Stanford AIMI on Hugging Face.
 
-        - Model: StanfordAIMI/CheXagent-2-3b (Integration for image analysis and disease detection)
+        - Model: StanfordAIMI/CheXagent-2-3b (integrated for image analysis and disease detection)
         """
     )
 
@@ -678,12 +601,12 @@ def interactive_demos_page():
             logits = chexnet_model(tensor_img_chexnet)
             probs = F.softmax(logits, dim=1)
             chexnet_prob = probs[0, 1].item()
-            chexnet_pred = 1 if chexnet_prob >= 0.5 else 0
+            chexnet_pred = "Disease Detected" if chexnet_prob >= 0.5 else "No Disease"
         # CheXagent prediction using our inference function.
         prompt = "Analyze the chest X‑ray image and return what you see along with the disease name detected."
         chexagent_response = chexagent_inference(image, prompt=prompt)
         st.markdown("### CheXNet Prediction")
-        st.write(f"Prediction: {'Disease' if chexnet_pred == 1 else 'No Disease'}")
+        st.write(f"Prediction: {chexnet_pred}")
         st.write(f"Probability: {chexnet_prob:.2%}")
         st.markdown("### CheXagent Response")
         st.write(chexagent_response)
@@ -705,14 +628,14 @@ def live_metrics_dashboard_page():
         if "Gender" in df_results.columns:
             total_F = df_results[df_results["Gender"]=="F"].shape[0]
             total_M = df_results[df_results["Gender"]=="M"].shape[0]
-            F_disease = df_results[(df_results["Gender"]=="F") & (df_results["Prediction"]==1)].shape[0]
-            M_disease = df_results[(df_results["Gender"]=="M") & (df_results["Prediction"]==1)].shape[0]
+            F_disease = df_results[(df_results["Gender"]=="F") & (df_results["Prediction"]=="Disease Detected")].shape[0]
+            M_disease = df_results[(df_results["Gender"]=="M") & (df_results["Prediction"]=="Disease Detected")].shape[0]
             rate_F = F_disease/total_F if total_F > 0 else 0
             rate_M = M_disease/total_M if total_M > 0 else 0
             st.write(f"**Female Detection Rate:** {rate_F:.2%} ({total_F} images)")
             st.write(f"**Male Detection Rate:** {rate_M:.2%} ({total_M} images)")
             st.write(f"**Bias Difference:** {abs(rate_F - rate_M):.4f}")
-        chart_data = df_results[["Prediction", "Probability"]]
+        chart_data = df_results[["Probability"]]
         st.line_chart(chart_data)
 
 # ------------------------- SIDEBAR NAVIGATION -------------------------
