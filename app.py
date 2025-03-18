@@ -229,24 +229,24 @@ def unify_disease_label(label):
 
 def preprocess_image(image, model_name):
     """Preprocess image for model input based on model type"""
-    # Convert to grayscale first for medical imaging models
-    if image.mode != 'L':  # If not already grayscale
-        image = image.convert('L')
-
-    # Make sure image is square by center cropping
-    width, height = image.size
-    if width != height:
-        new_size = min(width, height)
-        left = (width - new_size) // 2
-        top = (height - new_size) // 2
-        right = left + new_size
-        bottom = top + new_size
-        image = image.crop((left, top, right, bottom))
-
     # Different preprocessing depending on model source
     if model_name in MODELS and MODELS[model_name]["source"] == "torchxrayvision":
-        # Use TorchXRayVision's preprocessing
-        # Resize to 224x224 first using PIL
+        # For TorchXRayVision models (CheXpert, MIMIC-CXR)
+        # Convert to grayscale
+        if image.mode != 'L':
+            image = image.convert('L')
+
+        # Make sure image is square by center cropping
+        width, height = image.size
+        if width != height:
+            new_size = min(width, height)
+            left = (width - new_size) // 2
+            top = (height - new_size) // 2
+            right = left + new_size
+            bottom = top + new_size
+            image = image.crop((left, top, right, bottom))
+
+        # Resize to 224x224 using PIL
         image = image.resize((224, 224), Image.LANCZOS)
 
         # Convert PIL image to numpy array with float32 dtype
@@ -261,14 +261,43 @@ def preprocess_image(image, model_name):
 
         # Convert to tensor
         tensor_img = torch.from_numpy(img)
+
     else:
-        # Standard preprocessing for PyTorch models
+        # For PyTorch Hub models (DenseNet121, ResNet50)
+        # These models expect 3 channels (RGB)
+
+        # First make sure image is square by center cropping
+        width, height = image.size
+        if width != height:
+            new_size = min(width, height)
+            left = (width - new_size) // 2
+            top = (height - new_size) // 2
+            right = left + new_size
+            bottom = top + new_size
+            image = image.crop((left, top, right, bottom))
+
+        # Convert to RGB if it's not already
+        if image.mode != 'RGB':
+            # If grayscale, convert to RGB by duplicating the channel
+            if image.mode == 'L':
+                # We need to convert L to RGB by duplicating the single channel
+                image = Image.merge("RGB", (image, image, image))
+            else:
+                # For any other mode, convert to RGB normally
+                image = image.convert('RGB')
+
+        # Standard preprocessing for RGB models
         transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485], std=[0.229])  # Standard ImageNet normalization
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ImageNet normalization
         ])
-        tensor_img = transform(image).unsqueeze(0)
+
+        tensor_img = transform(image)
+
+        # Add batch dimension if needed
+        if len(tensor_img.shape) == 3:  # [C, H, W]
+            tensor_img = tensor_img.unsqueeze(0)  # Add batch dim -> [1, C, H, W]
 
     return tensor_img
 
