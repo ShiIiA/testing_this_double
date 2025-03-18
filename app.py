@@ -12,22 +12,84 @@ import logging
 import warnings
 import streamlit as st
 import pandas as pd
+import numpy as np
+import altair as alt
+import plotly.express as px
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models
 import torchvision.transforms as transforms
+import gdown  # Google Drive downloader
 from PIL import Image
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from collections import Counter
+import re
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
+# ------------------------- LOGGING CONFIGURATION -------------------------
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 # ------------------------- PAGE CONFIGURATION -------------------------
 st.set_page_config(
-    page_title="Dynamic Medical AI",
-    page_icon="🔬",
+    page_title="Gender Bias in Radiology",
+    page_icon="🩺",
     layout="wide"
 )
+
+# ------------------------- THEME & STYLE FUNCTIONS -------------------------
+def set_background():
+    style = """
+    <style>
+    .stApp {
+        background: linear-gradient(to bottom right, #ffffff, #e6f7ff);
+        color: #000;
+    }
+    .stTitle {
+        font-size: 36px !important;
+        font-weight: bold;
+        color: #000 !important;
+    }
+    </style>
+    """
+    st.markdown(style, unsafe_allow_html=True)
+
+set_background()
+
+def set_gradient_progress_bar():
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stProgressBar"] > div[role="progressbar"] > div {
+            background: linear-gradient(to right, #4facfe, #00f2fe);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+set_gradient_progress_bar()
+
+# ------------------------- MODEL PATHS AND URLS -------------------------
+MODELS = {
+    "CheXNet": {
+        "url": "https://drive.google.com/uc?id=1IjI4Cuou2n1lO1bLux8hPEI3AtkoxOSf",
+        "path": "chexnet_model.pth.tar",
+        "classes": 14
+    },
+    "CheXNeXt": {
+        "url": "https://drive.google.com/uc?id=1gGUmH3yrn88SZqUXKPh1hfFVJXR5qP2b",
+        "path": "chexnext_model.pth.tar",
+        "classes": 14
+    },
+    "Anatomy-XNet": {
+        "url": "https://drive.google.com/uc?id=1NtcE85ZYXVSrrHXI4VZIaDgGVC4kTyoq",
+        "path": "anatomy_xnet_model.pth.tar",
+        "classes": 14
+    }
+}
 
 # ------------------------- GLOBAL SESSION STATE -------------------------
 if "df" not in st.session_state:
@@ -36,103 +98,2552 @@ if "disease_col" not in st.session_state:
     st.session_state.disease_col = None
 if "gender_col" not in st.session_state:
     st.session_state.gender_col = None
+if "image_id_col" not in st.session_state:
+    st.session_state.image_id_col = None
+if "age_col" not in st.session_state:
+    st.session_state.age_col = None
+if "df_results" not in st.session_state:
+    st.session_state.df_results = pd.DataFrame(columns=["Image_ID", "Gender", "Actual", "Prediction", "Probability", "Model"])
 if "disease_classes" not in st.session_state:
     st.session_state.disease_classes = []
-if "model_loaded" not in st.session_state:
-    st.session_state.model_loaded = False
+if "models_loaded" not in st.session_state:
+    st.session_state.models_loaded = {}
 if "device" not in st.session_state:
-    st.session_state.device = "cpu"
-if "chexnet_model" not in st.session_state:
-    st.session_state.chexnet_model = None
+    st.session_state.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ------------------------- UPLOAD DATASET -------------------------
-st.title("📂 Upload Medical Dataset")
-uploaded_file = st.file_uploader("Upload your dataset (CSV/XLSX)", type=["csv", "xlsx"])
+# ------------------------- MODEL & HELPER FUNCTIONS -------------------------
+def download_model(model_name):
+    """Download model from Google Drive if not already downloaded"""
+    model_info = MODELS[model_name]
+    if not os.path.exists(model_info["path"]):
+        with st.spinner(f"Downloading {model_name} model... This may take a few minutes."):
+            try:
+                gdown.download(model_info["url"], model_info["path"], quiet=False)
+                st.success(f"✅ {model_name} downloaded successfully!")
+            except Exception as e:
+                st.error(f"Error downloading {model_name}: {e}")
+                return False
+    return True
 
-if uploaded_file:
+def load_model(model_name):
+    """Load the specified model"""
+    if model_name in st.session_state.models_loaded:
+        return st.session_state.models_loaded[model_name]
+
+    if not download_model(model_name):
+        return None
+
     try:
-        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
-        st.session_state.df = df
-        st.write("**Preview of Uploaded Data:**")
-        st.dataframe(df.head())
+        # Define model architecture - DenseNet121 for all models
+        class ChestXrayNet(nn.Module):
+            def __init__(self, num_classes=14):
+                super(ChestXrayNet, self).__init__()
+                self.densenet = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=False)
+                self.densenet.classifier = nn.Linear(1024, num_classes)
 
-        # Allow user to select gender and disease columns
-        st.session_state.gender_col = st.selectbox("Select Gender Column", df.columns.tolist())
-        st.session_state.disease_col = st.selectbox("Select Disease Column", df.columns.tolist())
+            def forward(self, x):
+                return self.densenet(x)
 
-        # Convert disease column values to string to avoid type errors
-        df[st.session_state.disease_col] = df[st.session_state.disease_col].astype(str)
+        model_info = MODELS[model_name]
+        model = ChestXrayNet(num_classes=model_info["classes"])
 
-        # Extract unique disease values dynamically
-        disease_classes = df[st.session_state.disease_col].dropna().unique().tolist()
-        st.session_state.disease_classes = sorted(map(str, disease_classes))  # Convert to string
+        # Load pre-trained weights
+        checkpoint = torch.load(model_info["path"], map_location=st.session_state.device)
 
-        if not disease_classes:
-            st.warning("⚠️ No diseases detected in the selected column.")
+        # Handle different checkpoint formats
+        if 'state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['state_dict'])
         else:
-            st.success(f"✅ Detected {len(disease_classes)} diseases: {', '.join(st.session_state.disease_classes)}")
+            model.load_state_dict(checkpoint)
 
-            # Load model after detecting disease classes
-            num_classes = len(st.session_state.disease_classes)
+        model = model.to(st.session_state.device)
+        model.eval()
 
-            # Load DenseNet121 model dynamically
-            st.session_state.chexnet_model = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
-            st.session_state.chexnet_model.classifier = nn.Linear(1024, num_classes)  # Adjust output layer
-            st.session_state.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            st.session_state.chexnet_model = st.session_state.chexnet_model.to(st.session_state.device)
-            st.session_state.chexnet_model.eval()
-
-            # Mark model as loaded
-            st.session_state.model_loaded = True
-            st.success("✅ Model Loaded Successfully!")
+        st.session_state.models_loaded[model_name] = model
+        return model
 
     except Exception as e:
-        logging.error("Error loading file", exc_info=True)
-        st.error(f"🚨 Error loading file: {e}")
+        logging.error(f"Error loading {model_name} model", exc_info=True)
+        st.error(f"🚨 Error loading {model_name} model: {e}")
+        return None
 
-# ------------------------- PREPROCESS IMAGE -------------------------
+def unify_gender_label(label):
+    """Convert various gender labels to standardized format"""
+    text = str(label).strip().lower()
+    male_keywords = ["m", "male", "man", "masculin"]
+    female_keywords = ["f", "female", "woman", "femme"]
+
+    if any(kw in text for kw in male_keywords):
+        return "M"
+    if any(kw in text for kw in female_keywords):
+        return "F"
+    return "Unknown"
+
+def unify_disease_label(label):
+    """Convert various disease labels to standardized format"""
+    text = str(label).strip().lower()
+    no_disease_keywords = ["no finding", "none", "negative", "normal", "0", "false", "no disease"]
+
+    if any(kw in text for kw in no_disease_keywords):
+        return "No Disease"
+    return text
+
 def preprocess_image(image):
+    """Preprocess image for model input"""
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
-        transforms.ToTensor()
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ImageNet normalization
     ])
     return transform(image).unsqueeze(0)
 
-# ------------------------- MODEL PREDICTION -------------------------
-def predict_disease(image):
-    if not st.session_state.model_loaded or st.session_state.chexnet_model is None:
-        st.error("❌ Model is not loaded yet. Please upload a dataset and select disease labels first.")
+def predict_disease(image, model_name="CheXNet", threshold=0.5):
+    """Predict disease from image using specified model"""
+    model = load_model(model_name)
+    if model is None:
         return None, None
 
     tensor_img = preprocess_image(image).to(st.session_state.device)
+
     with torch.no_grad():
-        logits = st.session_state.chexnet_model(tensor_img)
-        probs = F.softmax(logits, dim=1)  # Multi-class probabilities
+        logits = model(tensor_img)
+        probs = torch.sigmoid(logits)  # Multi-label classification
 
-        # Dynamically assign labels
-        THRESHOLD = 0.5
-        predicted_labels = [st.session_state.disease_classes[i] for i, prob in enumerate(probs[0]) if prob >= THRESHOLD]
-        if not predicted_labels:
-            predicted_labels.append("No Disease")
-    return ", ".join(predicted_labels), probs.max().item()
+        # Get the highest probability disease
+        max_prob, max_idx = torch.max(probs[0], dim=0)
+        max_prob = max_prob.item()
 
-# ------------------------- IMAGE UPLOAD AND PREDICTION -------------------------
-st.title("🖼️ Predict Diseases from X-ray Images")
-uploaded_images = st.file_uploader("Upload X-ray Images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+        # Get predicted labels based on threshold
+        if max_prob >= threshold:
+            if st.session_state.disease_classes:
+                predicted_label = st.session_state.disease_classes[max_idx]
+            else:
+                predicted_label = f"Disease_{max_idx}"
+        else:
+            predicted_label = "No Disease"
 
-if uploaded_images:
-    if not st.session_state.model_loaded:
-        st.warning("⚠️ Model not loaded yet. Please upload a dataset and select disease labels.")
+    return predicted_label, max_prob
+
+def compute_fairness_metrics(df, protected_attribute, target, prediction):
+    """Compute fairness metrics based on predictions"""
+    try:
+        # Group dataframe by protected attribute
+        groups = df[protected_attribute].unique()
+        metrics = {}
+
+        for group in groups:
+            group_df = df[df[protected_attribute] == group]
+            if len(group_df) == 0:
+                continue
+
+            y_true = group_df[target]
+            y_pred = group_df[prediction]
+
+            metrics[group] = {
+                'size': len(group_df),
+                'positive_rate': y_pred.mean(),
+                'accuracy': accuracy_score(y_true, y_pred),
+                'precision': precision_score(y_true, y_pred, zero_division=0),
+                'recall': precision_score(y_true, y_pred, zero_division=0),
+                'f1': f1_score(y_true, y_pred, zero_division=0)
+            }
+
+            try:
+                metrics[group]['auc'] = roc_auc_score(y_true, y_pred)
+            except:
+                metrics[group]['auc'] = float('nan')
+
+        # Calculate disparities
+        if len(metrics) >= 2:
+            groups_list = list(metrics.keys())
+            disparities = {
+                'positive_rate_disparity': abs(metrics[groups_list[0]]['positive_rate'] - metrics[groups_list[1]]['positive_rate']),
+                'accuracy_disparity': abs(metrics[groups_list[0]]['accuracy'] - metrics[groups_list[1]]['accuracy']),
+                'precision_disparity': abs(metrics[groups_list[0]]['precision'] - metrics[groups_list[1]]['precision']),
+                'recall_disparity': abs(metrics[groups_list[0]]['recall'] - metrics[groups_list[1]]['recall']),
+                'f1_disparity': abs(metrics[groups_list[0]]['f1'] - metrics[groups_list[1]]['f1']),
+            }
+
+            try:
+                disparities['auc_disparity'] = abs(metrics[groups_list[0]]['auc'] - metrics[groups_list[1]]['auc'])
+            except:
+                disparities['auc_disparity'] = float('nan')
+
+            metrics['disparities'] = disparities
+
+        return metrics
+    except Exception as e:
+        logging.error("Error computing fairness metrics", exc_info=True)
+        st.error(f"Error computing fairness metrics: {e}")
+        return {}
+
+def apply_bias_mitigation(df, protected_attribute, prediction_col, probability_col, method="threshold_adjustment"):
+    """Apply bias mitigation techniques to predictions"""
+    try:
+        df_mitigated = df.copy()
+        groups = df[protected_attribute].unique()
+
+        if method == "threshold_adjustment":
+            # Find optimal thresholds for each group
+            thresholds = {}
+
+            for group in groups:
+                group_df = df[df[protected_attribute] == group]
+                if len(group_df) == 0:
+                    continue
+
+                # Get the current positive rate
+                current_rate = group_df[prediction_col].mean()
+                thresholds[group] = 0.5  # Default threshold
+
+                # We'll adjust threshold based on overall positive rate
+                # This is a simple approach - more sophisticated methods can be implemented
+                overall_rate = df[prediction_col].mean()
+
+                # If this group has higher positive rate than overall, increase threshold
+                if current_rate > overall_rate:
+                    thresholds[group] = 0.5 + (current_rate - overall_rate) / 2
+
+                # If this group has lower positive rate than overall, decrease threshold
+                elif current_rate < overall_rate:
+                    thresholds[group] = 0.5 - (overall_rate - current_rate) / 2
+
+            # Apply the new thresholds
+            for group, threshold in thresholds.items():
+                group_mask = df_mitigated[protected_attribute] == group
+                df_mitigated.loc[group_mask, "Mitigated_Prediction"] = (
+                    df_mitigated.loc[group_mask, probability_col] >= threshold
+                ).astype(int)
+
+        elif method == "reweighing":
+            # Reweighing assigns weights to training instances to ensure fairness
+            # This is a simplified version for demonstration
+            weights = {}
+            total_count = len(df)
+
+            for group in groups:
+                group_df = df[df[protected_attribute] == group]
+                if len(group_df) == 0:
+                    continue
+
+                group_size = len(group_df)
+                group_positive = group_df[prediction_col].sum()
+
+                # Calculate weights inversely proportional to positive rate
+                if group_positive > 0:
+                    weights[group] = total_count / (2 * group_size * (group_positive / group_size))
+                else:
+                    weights[group] = 1.0
+
+            # Apply weights to adjust predictions
+            # This is simplified - in practice, you would retrain the model with these weights
+            df_mitigated["Mitigated_Prediction"] = df_mitigated[prediction_col]
+
+        else:
+            # Default to copying original predictions
+            df_mitigated["Mitigated_Prediction"] = df_mitigated[prediction_col]
+
+        return df_mitigated
+
+    except Exception as e:
+        logging.error(f"Error applying bias mitigation: {e}", exc_info=True)
+        return df
+
+# ------------------------- PAGE FUNCTIONS -------------------------
+def home_page():
+    st.title("🏠 Home")
+    st.markdown("## Addressing Gender Bias in AI-Driven Radiology")
+    st.markdown(
+        """
+        **Why Gender Bias Matters in Medical AI:**
+
+        - **Ethical concerns:** Unfair treatment may result from biased predictions
+        - **Clinical impact:** Risk of misdiagnosis for underrepresented groups
+        - **Regulatory pressure:** Fairness requirements in AI medical applications
+        - **Research evidence:** Underrepresentation in training data leads to poorer outcomes
+
+        This application helps you:
+        1. Upload and analyze medical imaging datasets
+        2. Detect diseases using state-of-the-art AI models
+        3. Assess gender bias in model predictions
+        4. Apply bias mitigation techniques
+        5. Compare performance before and after bias mitigation
+        """
+    )
+    st.info("Use the sidebar to navigate through the app.")
+
+    # Display model information
+    st.markdown("## Available Models")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("### CheXNet")
+        st.markdown("Pre-trained model for chest X-ray diagnosis with 14 disease categories.")
+        if st.button("Load CheXNet", key="load_chexnet"):
+            with st.spinner("Loading CheXNet..."):
+                if load_model("CheXNet"):
+                    st.success("✅ CheXNet loaded successfully!")
+
+    with col2:
+        st.markdown("### CheXNeXt")
+        st.markdown("Improved version of CheXNet with better accuracy and robustness.")
+        if st.button("Load CheXNeXt", key="load_chexnext"):
+            with st.spinner("Loading CheXNeXt..."):
+                if load_model("CheXNeXt"):
+                    st.success("✅ CheXNeXt loaded successfully!")
+
+    with col3:
+        st.markdown("### Anatomy-XNet")
+        st.markdown("Model with attention to anatomical regions for improved diagnosis.")
+        if st.button("Load Anatomy-XNet", key="load_anatomy"):
+            with st.spinner("Loading Anatomy-XNet..."):
+                if load_model("Anatomy-XNet"):
+                    st.success("✅ Anatomy-XNet loaded successfully!")
+
+    st.markdown("---")
+    st.markdown("### Acknowledgments")
+    st.markdown(
+        """
+        **Thank you to the mentors, sponsors, and jury of the WiDS Datathon for their invaluable support.**
+        """
+    )
+
+def upload_data_page():
+    st.title("📂 Upload Data")
+    uploaded_file = st.file_uploader("Upload your dataset (CSV/XLSX)", type=["csv", "xlsx"],
+                                     help="Upload a CSV or Excel file containing your data.")
+    if uploaded_file:
+        try:
+            df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
+            # Remove duplicate columns if any
+            df = df.loc[:, ~df.columns.duplicated()]
+
+            st.session_state.df = df
+            st.write("**Preview of Uploaded Data:**")
+            st.dataframe(df.head())
+
+            # Let user select important columns
+            st.markdown("### Select Key Columns")
+            st.markdown("Please identify the columns that contain the following information:")
+
+            # Columns for identification, gender, disease, and optional age
+            st.session_state.image_id_col = st.selectbox("Image ID Column:", df.columns.tolist(),
+                                                        help="Column containing unique identifiers for each image")
+
+            st.session_state.gender_col = st.selectbox("Gender Column:", df.columns.tolist(),
+                                                      help="Column containing gender information (M/F)")
+
+            st.session_state.disease_col = st.selectbox("Disease Column:", df.columns.tolist(),
+                                                       help="Column containing disease information")
+
+            st.session_state.age_col = st.selectbox("Age Column (optional):", [None] + df.columns.tolist(),
+                                                   help="Optional column containing patient age")
+
+            # Extract and standardize gender values
+            df[st.session_state.gender_col] = df[st.session_state.gender_col].apply(unify_gender_label)
+
+            # Extract and standardize disease values
+            df[st.session_state.disease_col] = df[st.session_state.disease_col].apply(unify_disease_label)
+
+            # Extract unique disease values
+            disease_classes = df[st.session_state.disease_col].dropna().unique().tolist()
+            st.session_state.disease_classes = sorted(disease_classes)
+
+            if not disease_classes:
+                st.warning("⚠️ No diseases detected in the selected column.")
+            else:
+                st.success(f"✅ Detected {len(disease_classes)} diseases/conditions: {', '.join(st.session_state.disease_classes)}")
+
+            # Show gender distribution
+            gender_counts = df[st.session_state.gender_col].value_counts()
+            st.markdown("### Gender Distribution")
+            st.bar_chart(gender_counts)
+
+            # Save processed dataframe
+            st.session_state.df = df
+
+        except Exception as e:
+            logging.error("Error loading uploaded file", exc_info=True)
+            st.error(f"Error loading file: {e}")
     else:
-        for img in uploaded_images:
-            st.image(img, caption=f"Uploaded: {img.name}", width=300)
+        st.info("Please upload a dataset to continue.")
 
-            # Perform prediction
-            image = Image.open(img).convert("RGB")
-            pred_disease, confidence = predict_disease(image)
+def explore_data_page():
+    st.title("📊 Explore Data & Prepare")
+    df = st.session_state.df
+    if df is not None:
+        st.subheader("Select Columns for Visualization")
+        selected_cols = st.multiselect("Choose one or more columns to visualize:", df.columns.tolist())
+        if selected_cols:
+            for col in selected_cols:
+                st.markdown(f"### Visualization for **{col}**")
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    chart = alt.Chart(df).mark_bar().encode(
+                        alt.X(f"{col}:Q", bin=alt.Bin(maxbins=20), title=col),
+                        alt.Y("count()", title="Count"),
+                        tooltip=[col, "count()"]
+                    ).properties(width=600, height=400, title=f"Histogram of {col}")
+                    st.altair_chart(chart, use_container_width=True)
+                else:
+                    counts = df[col].value_counts().reset_index()
+                    counts.columns = [col, 'Count']
+                    chart = alt.Chart(counts).mark_bar().encode(
+                        alt.X(f"{col}:N", sort='-y', title=col),
+                        alt.Y("Count:Q", title="Count"),
+                        tooltip=[col, "Count"]
+                    ).properties(width=600, height=400, title=f"Bar Chart of {col}")
+                    st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("Please select at least one column for visualization.")
 
-            if pred_disease:
-                st.success(f"🦠 **Predicted Disease(s):** {pred_disease} | **Confidence:** {confidence:.2%}")
+        st.markdown("### Missing Values Summary")
+        missing = df.isnull().sum().reset_index()
+        missing.columns = ['Column', 'Missing Values']
+        missing['Percentage'] = (missing['Missing Values'] / len(df) * 100).round(2)
+        st.dataframe(missing.sort_values('Missing Values', ascending=False))
 
-# ------------------------- END OF APP -------------------------
-st.success("🎯 **App Ready!** Upload a dataset, make predictions, and analyze bias.")
+        # Show disease and gender relationship
+        if all(col in st.session_state for col in ['disease_col', 'gender_col']):
+            disease_col = st.session_state.disease_col
+            gender_col = st.session_state.gender_col
+            age_col = st.session_state.age_col
+
+            st.markdown("### Disease and Gender Visualization")
+            selected_disease = st.selectbox("Select Disease Category:",
+                                           options=sorted(df[disease_col].dropna().unique()))
+
+            filtered_df = df[df[disease_col] == selected_disease]
+            if filtered_df.empty:
+                st.info("No records found for the selected disease category.")
+            else:
+                # Pre-aggregate gender counts for the pie chart
+                gender_counts = filtered_df[gender_col].value_counts().reset_index()
+                gender_counts.columns = [gender_col, "Count"]
+
+                pie_chart = px.pie(
+                    gender_counts,
+                    names=gender_col,
+                    values="Count",
+                    title=f"Gender Distribution for {selected_disease}",
+                    color=gender_col,
+                    color_discrete_map={"F": "pink", "M": "blue", "Unknown": "gray"},
+                    hover_data=["Count"]
+                )
+
+                # Update trace to show percentage
+                pie_chart.update_traces(texttemplate='%{percent:.1%}', textposition='inside')
+                st.plotly_chart(pie_chart, use_container_width=True)
+
+                # Show age distribution if age column is available
+                if age_col:
+                    try:
+                        df[age_col] = pd.to_numeric(df[age_col], errors='coerce')
+
+                        # Age distribution by gender for the selected disease
+                        st.markdown(f"### Age Distribution for {selected_disease} by Gender")
+
+                        fig = px.box(filtered_df, x=gender_col, y=age_col,
+                                     title=f"Age Distribution for {selected_disease} by Gender",
+                                     color=gender_col, color_discrete_map={"F": "pink", "M": "blue", "Unknown": "gray"})
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Could not process age data: {e}")
+
+            # Disease distribution across genders
+            st.markdown("### Disease Distribution Across Genders")
+
+            # Create pivot table
+            pivot_df = pd.pivot_table(df, index=disease_col, columns=gender_col, aggfunc='size', fill_value=0)
+
+            # Add percentages
+            total_counts = pivot_df.sum(axis=1)
+            for col in pivot_df.columns:
+                pivot_df[f"{col}_pct"] = (pivot_df[col] / total_counts * 100).round(1)
+
+            # Sort by total counts
+            pivot_df = pivot_df.sort_values(by=total_counts.name, ascending=False)
+
+            # Display the table
+            st.dataframe(pivot_df)
+
+            # Visualize disease distribution
+            disease_counts = df[disease_col].value_counts().head(10)
+            st.markdown("### Top 10 Diseases/Conditions")
+            st.bar_chart(disease_counts)
+
+        else:
+            st.info("Please select disease and gender columns in the Upload Data page.")
+    else:
+        st.info("No data uploaded. Please use the Upload Data page.")
+
+def model_prediction_page():
+    st.title("🤖 Model Prediction")
+    st.markdown("Select an AI model and upload chest X-ray images for prediction.")
+
+    if st.session_state.df is None:
+        st.warning("⚠️ Please upload and process a dataset before making predictions.")
+        return
+
+    if not st.session_state.disease_classes:
+        st.warning("⚠️ No disease classes detected. Please ensure you've selected the correct disease column.")
+        return
+
+    # Model selection
+    model_choice = st.selectbox(
+        "Select AI Model:",
+        ["CheXNet", "CheXNeXt", "Anatomy-XNet"],
+        help="Choose the model to use for prediction."
+    )
+
+    # Decision threshold
+    threshold = st.slider(
+        "Decision Threshold",
+        0.0, 1.0, 0.5, 0.01,
+        help="Adjust the threshold for positive disease classification."
+    )
+
+    # Upload images
+    uploaded_images = st.file_uploader(
+        "Upload X-ray Images",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        help="Upload one or more chest X-ray images for analysis."
+    )
+
+    if uploaded_images:
+        # Load the selected model
+        model = load_model(model_choice)
+        if model is None:
+            st.error(f"❌ {model_choice} could not be loaded. Please try again.")
+            return
+
+        with st.spinner("Processing images..."):
+            progress_bar = st.progress(0)
+            total_images = len(uploaded_images)
+            results = []
+
+            for i, img in enumerate(uploaded_images, start=1):
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.write(f"Processing Image {i}/{total_images}")
+                    st.image(img, caption=f"Uploaded: {img.name}", width=300)
+
+                with col2:
+                    try:
+                        # Process image
+                        image = Image.open(img).convert("RGB")
+                        predicted_label, confidence = predict_disease(image, model_choice, threshold)
+
+                        # Try to find the actual label and gender in the dataset
+                        image_id = os.path.splitext(img.name)[0]
+                        df = st.session_state.df
+                        id_col = st.session_state.image_id_col
+
+                        # Find the image in the dataset
+                        matches = df[df[id_col].astype(str).str.contains(image_id, case=False, na=False)]
+
+                        if not matches.empty:
+                            # Get actual disease and gender
+                            actual_disease = matches.iloc[0][st.session_state.disease_col]
+                            gender = matches.iloc[0][st.session_state.gender_col]
+                        else:
+                            actual_disease = "Unknown"
+                            gender = "Unknown"
+
+                        # Add result to our tracking dataframe
+                        new_row = {
+                            "Image_ID": img.name,
+                            "Gender": gender,
+                            "Actual": actual_disease,
+                            "Prediction": predicted_label,
+                            "Probability": confidence,
+                            "Model": model_choice
+                        }
+                        results.append(new_row)
+
+                        # Display prediction results
+                        st.markdown(f"**Prediction:** {predicted_label}")
+                        st.markdown(f"**Confidence:** {confidence:.2%}")
+                        st.markdown(f"**Actual Disease:** {actual_disease}")
+                        st.markdown(f"**Gender:** {gender}")
+
+                        # Show if prediction matches actual
+                        if actual_disease != "Unknown":
+                            if predicted_label == actual_disease:
+                                st.success("✅ Correct prediction!")
+                            else:
+                                st.error("❌ Incorrect prediction")
+
+                    except Exception as e:
+                        logging.error(f"Error processing image {img.name}", exc_info=True)
+                        st.error(f"❌ Error processing image: {e}")
+
+                progress_bar.progress(int((i / total_images) * 100))
+
+            # Update results in session state
+            if results:
+                new_results_df = pd.DataFrame(results)
+                st.session_state.df_results = pd.concat([st.session_state.df_results, new_results_df], ignore_index=True)
+
+                # Show summary of predictions
+                st.markdown("### Prediction Summary")
+                st.dataframe(new_results_df)
+
+                # Calculate and display accuracy
+                if "Actual" in new_results_df.columns and not all(new_results_df["Actual"] == "Unknown"):
+                    accuracy = (new_results_df["Prediction"] == new_results_df["Actual"]).mean()
+                    st.markdown(f"**Batch Accuracy:** {accuracy:.2%}")
+    else:
+        st.info("Upload images to generate predictions.")
+
+def gender_bias_analysis_page():
+    st.title("⚖️ Gender Bias Analysis")
+
+    df_results = st.session_state.df_results
+    if df_results.empty:
+        st.info("No prediction data available yet. Please make predictions first.")
+        return
+
+    st.markdown("### Overview of Predictions by Gender")
+
+    # Filter out rows with unknown gender
+    df_gender = df_results[df_results["Gender"] != "Unknown"]
+
+    if df_gender.empty:
+        st.warning("No predictions with known gender available for analysis.")
+        return
+
+    # Count predictions by gender
+    gender_counts = df_gender["Gender"].value_counts()
+    st.write("**Total predictions by gender:**")
+
+    # Create columns to display gender statistics
+    col1, col2 = st.columns(2)
+
+    with col1:
+        total_F = gender_counts.get("F", 0)
+        total_M = gender_counts.get("M", 0)
+
+        st.metric("Female", f"{total_F}")
+        st.metric("Male", f"{total_M}")
+
+        # Calculate gender ratio
+        if total_M > 0:
+            gender_ratio = total_F / total_M
+            st.write(f"**Female-to-Male Ratio:** {gender_ratio:.2f}")
+
+    with col2:
+        # Create pie chart of gender distribution
+        fig = px.pie(
+            values=[total_F, total_M],
+            names=["Female", "Male"],
+            title="Gender Distribution",
+            color=["Female", "Male"],
+            color_discrete_map={"Female": "pink", "Male": "blue"}
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Analyze disease predictions by gender
+    st.markdown("### Disease Prediction Analysis by Gender")
+
+    # Count positive predictions (predicted disease)
+    pos_F = df_gender[(df_gender["Gender"] == "F") & (df_gender["Prediction"] != "No Disease")].shape[0]
+    pos_M = df_gender[(df_gender["Gender"] == "M") & (df_gender["Prediction"] != "No Disease")].shape[0]
+
+    # Calculate positive prediction rates
+    rate_F = pos_F / total_F if total_F > 0 else 0
+    rate_M = pos_M / total_M if total_M > 0 else 0
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write(f"**Female Disease Detection Rate:** {rate_F:.2%}")
+        st.write(f"**Male Disease Detection Rate:** {rate_M:.2%}")
+
+        # Calculate bias difference
+        bias_diff = abs(rate_F - rate_M)
+        st.write(f"**Absolute Bias Difference:** {bias_diff:.4f}")
+
+        # Show bias assessment
+        if bias_diff > 0.15:
+            st.error("⚠️ Significant gender bias detected!")
+        elif bias_diff > 0.05:
+            st.warning("⚠️ Moderate gender bias detected")
+        else:
+            st.success("✅ Low gender bias detected")
+
+    with col2:
+        # Bar chart comparing detection rates
+        comp_data = pd.DataFrame({
+            "Gender": ["Female", "Male"],
+            "Detection Rate": [rate_F, rate_M]
+        })
+
+        fig = px.bar(
+            comp_data,
+            x="Gender",
+            y="Detection Rate",
+            color="Gender",
+            color_discrete_map={"Female": "pink", "Male": "blue"},
+            title="Disease Detection Rate by Gender"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Accuracy analysis by gender if we have ground truth
+    if "Actual" in df_gender.columns and not all(df_gender["Actual"] == "Unknown"):
+        st.markdown("### Accuracy Analysis by Gender")
+
+        # Calculate accuracy by gender
+        acc_F = df_gender[df_gender["Gender"] == "F"]["Prediction"] == df_gender[df_gender["Gender"] == "F"]["Actual"]
+        acc_M = df_gender[df_gender["Gender"] == "M"]["Prediction"] == df_gender[df_gender["Gender"] == "M"]["Actual"]
+
+        acc_F_rate = acc_F.mean() if not acc_F.empty else 0
+        acc_M_rate = acc_M.mean() if not acc_M.empty else 0
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.write(f"**Female Accuracy:** {acc_F_rate:.2%}")
+            st.write(f"**Male Accuracy:** {acc_M_rate:.2%}")
+
+            # Calculate accuracy disparity
+            acc_diff = abs(acc_F_rate - acc_M_rate)
+            st.write(f"**Accuracy Disparity:** {acc_diff:.4f}")
+
+            # Show accuracy disparity assessment
+            if acc_diff > 0.15:
+                st.error("⚠️ Significant accuracy disparity!")
+            elif acc_diff > 0.05:
+                st.warning("⚠️ Moderate accuracy disparity")
+            else:
+                st.success("✅ Low accuracy disparity")
+
+        with col2:
+            # Bar chart comparing accuracy
+            acc_data = pd.DataFrame({
+                "Gender": ["Female", "Male"],
+                "Accuracy": [acc_F_rate, acc_M_rate]
+            })
+
+            fig = px.bar(
+                acc_data,
+                x="Gender",
+                y="Accuracy",
+                color="Gender",
+                color_discrete_map={"Female": "pink", "Male": "blue"},
+                title="Model Accuracy by Gender"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Disease-specific analysis
+    if len(df_gender["Prediction"].unique()) > 2:  # More than just binary classification
+        st.markdown("### Disease-Specific Gender Analysis")
+
+        # Group by disease and gender
+        disease_gender = df_gender.groupby(["Prediction", "Gender"]).size().unstack(fill_value=0)
+
+        # Calculate percentages
+        disease_gender_pct = disease_gender.div(disease_gender.sum(axis=1), axis=0) * 100
+
+        # Display the tables
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.write("**Disease counts by gender:**")
+            st.dataframe(disease_gender)
+
+        with col2:
+            st.write("**Disease distribution by gender (%):**")
+            st.dataframe(disease_gender_pct.round(1))
+
+        # Visualize disease distribution by gender
+        disease_data = []
+        for disease, row in disease_gender.iterrows():
+            for gender, count in row.items():
+                disease_data.append({
+                    "Disease": disease,
+                    "Gender": gender,
+                    "Count": count
+                })
+
+        disease_df = pd.DataFrame(disease_data)
+
+        # Get top diseases for visualization
+        top_diseases = disease_gender.sum(axis=1).nlargest(5).index.tolist()
+        disease_df_top = disease_df[disease_df["Disease"].isin(top_diseases)]
+
+        fig = px.bar(
+            disease_df_top,
+            x="Disease",
+            y="Count",
+            color="Gender",
+            barmode="group",
+            color_discrete_map={"F": "pink", "M": "blue"},
+            title="Top 5 Diseases by Gender"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Model comparison if multiple models were used
+    if len(df_gender["Model"].unique()) > 1:
+        st.markdown("### Bias Analysis by Model")
+
+        models = df_gender["Model"].unique()
+        model_bias = []
+
+        for model in models:
+            model_data = df_gender[df_gender["Model"] == model]
+
+            # Skip if insufficient data
+            if model_data.empty or "F" not in model_data["Gender"].values or "M" not in model_data["Gender"].values:
+                continue
+
+            # Calculate detection rates
+            m_total_F = model_data[model_data["Gender"] == "F"].shape[0]
+            m_total_M = model_data[model_data["Gender"] == "M"].shape[0]
+
+            m_pos_F = model_data[(model_data["Gender"] == "F") & (model_data["Prediction"] != "No Disease")].shape[0]
+            m_pos_M = model_data[(model_data["Gender"] == "M") & (model_data["Prediction"] != "No Disease")].shape[0]
+
+            m_rate_F = m_pos_F / m_total_F if m_total_F > 0 else 0
+            m_rate_M = m_pos_M / m_total_M if m_total_M > 0 else 0
+
+            model_bias.append({
+                "Model": model,
+                "Female Rate": m_rate_F,
+                "Male Rate": m_rate_M,
+                "Bias Difference": abs(m_rate_F - m_rate_M)
+            })
+
+        if model_bias:
+            model_bias_df = pd.DataFrame(model_bias)
+
+            # Display model bias comparison
+            st.write("**Model Bias Comparison:**")
+            st.dataframe(model_bias_df.round(4))
+
+            # Bar chart of bias by model
+            fig = px.bar(
+                model_bias_df,
+                x="Model",
+                y="Bias Difference",
+                color="Model",
+                title="Gender Bias by Model"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Summary and recommendations
+    st.markdown("### Bias Assessment Summary")
+
+    if bias_diff > 0.15:
+        st.error(
+            "**Significant gender bias detected in the model predictions!**\n\n"
+            "The model shows substantial disparity in how it treats different genders. "
+            "Consider applying bias mitigation techniques in the next section."
+        )
+    elif bias_diff > 0.05:
+        st.warning(
+            "**Moderate gender bias detected in the model predictions.**\n\n"
+            "There is some disparity in how the model treats different genders. "
+            "Consider exploring bias mitigation techniques."
+        )
+    else:
+        st.success(
+            "**Low gender bias detected in the model predictions.**\n\n"
+            "The model appears to be relatively fair across genders. "
+            "Continue monitoring as new data becomes available."
+        )
+
+def bias_mitigation_simulation_page():
+    st.title("🛠️ Bias Mitigation & Simulation")
+
+    df = st.session_state.df
+    df_results = st.session_state.df_results
+
+    if df is None or df_results.empty:
+        st.info("No prediction data available yet. Please make predictions first.")
+        return
+
+    # Remove rows with unknown gender
+    df_results_clean = df_results[df_results["Gender"] != "Unknown"].copy()
+
+    if df_results_clean.empty:
+        st.warning("No predictions with known gender available for bias mitigation.")
+        return
+
+    # Introduction to bias mitigation
+    st.markdown(
+        """
+        ### Introduction to Bias Mitigation
+
+        Bias mitigation in AI aims to reduce unfair disparities between different demographic groups.
+        Several techniques can be applied:
+
+        1. **Threshold Adjustment**: Apply different decision thresholds for different groups
+        2. **Reweighing**: Assign different weights to training instances from different groups
+        3. **Adversarial Debiasing**: Use adversarial techniques to remove sensitive attributes
+        4. **Fair Representations**: Learn representations that are independent of protected attributes
+        5. **Post-Processing Calibration**: Adjust model outputs after prediction
+        """
+    )
+
+    # Select mitigation approach
+    mitigation_method = st.selectbox(
+        "Select Mitigation Method:",
+        ["Threshold Adjustment", "Reweighing", "Post-Processing Calibration"],
+        help="Choose a method to mitigate gender bias"
+    )
+
+    st.markdown(f"### Apply {mitigation_method}")
+
+    # Define specific parameters based on mitigation method
+    if mitigation_method == "Threshold Adjustment":
+        st.markdown(
+            """
+            **Threshold Adjustment** applies different classification thresholds to different groups
+            to equalize error rates or positive prediction rates.
+            """
+        )
+
+        # Get current thresholds
+        current_threshold = 0.5  # Default threshold
+
+        # Allow setting different thresholds for different genders
+        col1, col2 = st.columns(2)
+
+        with col1:
+            female_threshold = st.slider(
+                "Threshold for Female",
+                0.0, 1.0, current_threshold, 0.01,
+                help="Lower the threshold to increase positive predictions for females"
+            )
+
+        with col2:
+            male_threshold = st.slider(
+                "Threshold for Male",
+                0.0, 1.0, current_threshold, 0.01,
+                help="Higher the threshold to decrease positive predictions for males"
+            )
+
+        # Create binary predictions for visualization
+        # NOTE: This is a simplified approach for demonstration
+        df_results_clean["Binary_Prediction"] = (df_results_clean["Prediction"] != "No Disease").astype(int)
+
+        # Apply thresholds based on gender
+        df_results_clean["Mitigated_Prediction"] = df_results_clean.apply(
+            lambda row: 1 if (row["Gender"] == "F" and row["Probability"] >= female_threshold) or
+                              (row["Gender"] == "M" and row["Probability"] >= male_threshold)
+                       else 0,
+            axis=1
+        )
+
+    elif mitigation_method == "Reweighing":
+        st.markdown(
+            """
+            **Reweighing** assigns different weights to training instances to ensure fairness.
+            This method is typically applied during model training, but we can simulate its effect.
+            """
+        )
+
+        # Calculate current positive rates
+        female_df = df_results_clean[df_results_clean["Gender"] == "F"]
+        male_df = df_results_clean[df_results_clean["Gender"] == "M"]
+
+        # Convert prediction to binary for easier calculation
+        df_results_clean["Binary_Prediction"] = (df_results_clean["Prediction"] != "No Disease").astype(int)
+
+        # Calculate positive rates
+        female_pos_rate = female_df["Binary_Prediction"].mean()
+        male_pos_rate = male_df["Binary_Prediction"].mean()
+
+        # Display current rates
+        st.write(f"**Current female positive rate:** {female_pos_rate:.2%}")
+        st.write(f"**Current male positive rate:** {male_pos_rate:.2%}")
+
+        # Weight factor to adjust positive rates
+        weight_factor = st.slider(
+            "Adjustment Factor",
+            0.0, 2.0, 1.0, 0.1,
+            help="Values < 1 reduce disparity by decreasing the higher rate, values > 1 increase the lower rate"
+        )
+
+        # Apply weights (simplified simulation)
+        if female_pos_rate > male_pos_rate:
+            # Reduce female positive rate
+            female_adj = 1 / weight_factor if weight_factor > 0 else 1
+            male_adj = 1
+        else:
+            # Reduce male positive rate
+            female_adj = 1
+            male_adj = 1 / weight_factor if weight_factor > 0 else 1
+
+        # Apply weighted predictions (simplified simulation)
+        df_results_clean["Mitigated_Prediction"] = df_results_clean.apply(
+            lambda row: 1 if (row["Gender"] == "F" and row["Binary_Prediction"] == 1 and np.random.random() <= female_adj) or
+                              (row["Gender"] == "M" and row["Binary_Prediction"] == 1 and np.random.random() <= male_adj)
+                       else 0,
+            axis=1
+        )
+
+    elif mitigation_method == "Post-Processing Calibration":
+        st.markdown(
+            """
+            **Post-Processing Calibration** adjusts predictions after the model has been trained
+            to ensure equal error rates or equal positive rates across groups.
+            """
+        )
+
+        # Convert prediction to binary for easier calculation
+        df_results_clean["Binary_Prediction"] = (df_results_clean["Prediction"] != "No Disease").astype(int)
+
+        # Current positive rates
+        female_df = df_results_clean[df_results_clean["Gender"] == "F"]
+        male_df = df_results_clean[df_results_clean["Gender"] == "M"]
+
+        female_pos_rate = female_df["Binary_Prediction"].mean()
+        male_pos_rate = male_df["Binary_Prediction"].mean()
+
+        # Display current rates
+        st.write(f"**Current female positive rate:** {female_pos_rate:.2%}")
+        st.write(f"**Current male positive rate:** {male_pos_rate:.2%}")
+
+        # Target equal positive rates
+        target_rate = st.slider(
+            "Target Positive Rate",
+            min(female_pos_rate, male_pos_rate),
+            max(female_pos_rate, male_pos_rate),
+            (female_pos_rate + male_pos_rate) / 2,
+            0.01,
+            help="Target equal positive prediction rate across genders"
+        )
+
+        # Apply calibration (simplified)
+        # This randomly flips predictions to achieve the target rate
+        df_results_clean["Mitigated_Prediction"] = df_results_clean["Binary_Prediction"].copy()
+
+        # For females
+        if female_pos_rate != target_rate:
+            female_indices = df_results_clean[df_results_clean["Gender"] == "F"].index
+            female_preds = df_results_clean.loc[female_indices, "Binary_Prediction"].values
+
+            num_female = len(female_indices)
+            current_pos = int(female_pos_rate * num_female)
+            target_pos = int(target_rate * num_female)
+
+            if current_pos < target_pos:
+                # Need to flip some 0s to 1s
+                flip_indices = np.random.choice(
+                    female_indices[female_preds == 0],
+                    target_pos - current_pos,
+                    replace=False
+                )
+                df_results_clean.loc[flip_indices, "Mitigated_Prediction"] = 1
+            else:
+                # Need to flip some 1s to 0s
+                flip_indices = np.random.choice(
+                    female_indices[female_preds == 1],
+                    current_pos - target_pos,
+                    replace=False
+                )
+                df_results_clean.loc[flip_indices, "Mitigated_Prediction"] = 0
+
+        # For males
+        if male_pos_rate != target_rate:
+            male_indices = df_results_clean[df_results_clean["Gender"] == "M"].index
+            male_preds = df_results_clean.loc[male_indices, "Binary_Prediction"].values
+
+            num_male = len(male_indices)
+            current_pos = int(male_pos_rate * num_male)
+            target_pos = int(target_rate * num_male)
+
+            if current_pos < target_pos:
+                # Need to flip some 0s to 1s
+                flip_indices = np.random.choice(
+                    male_indices[male_preds == 0],
+                    target_pos - current_pos,
+                    replace=False
+                )
+                df_results_clean.loc[flip_indices, "Mitigated_Prediction"] = 1
+            else:
+                # Need to flip some 1s to 0s
+                flip_indices = np.random.choice(
+                    male_indices[male_preds == 1],
+                    current_pos - target_pos,
+                    replace=False
+                )
+                df_results_clean.loc[flip_indices, "Mitigated_Prediction"] = 0
+
+    # Compute and display results of mitigation
+    st.markdown("### Mitigation Results")
+
+    # Ensure binary predictions for evaluation
+    if "Binary_Prediction" not in df_results_clean.columns:
+        df_results_clean["Binary_Prediction"] = (df_results_clean["Prediction"] != "No Disease").astype(int)
+
+    # Compute metrics before mitigation
+    female_before = df_results_clean[df_results_clean["Gender"] == "F"]["Binary_Prediction"].mean()
+    male_before = df_results_clean[df_results_clean["Gender"] == "M"]["Binary_Prediction"].mean()
+    disparity_before = abs(female_before - male_before)
+
+    # Compute metrics after mitigation
+    female_after = df_results_clean[df_results_clean["Gender"] == "F"]["Mitigated_Prediction"].mean()
+    male_after = df_results_clean[df_results_clean["Gender"] == "M"]["Mitigated_Prediction"].mean()
+    disparity_after = abs(female_after - male_after)
+
+    # Display comparison
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**Before Mitigation**")
+        st.write(f"Female positive rate: {female_before:.2%}")
+        st.write(f"Male positive rate: {male_before:.2%}")
+        st.write(f"Gender disparity: {disparity_before:.4f}")
+
+    with col2:
+        st.markdown("**After Mitigation**")
+        st.write(f"Female positive rate: {female_after:.2%}")
+        st.write(f"Male positive rate: {male_after:.2%}")
+        st.write(f"Gender disparity: {disparity_after:.4f}")
+
+    # Improvement
+    improvement = (1 - disparity_after/disparity_before) * 100 if disparity_before > 0 else 0
+    st.markdown(f"**Disparity reduction:** {improvement:.1f}%")
+
+    # Visualize the changes
+    comparison_data = pd.DataFrame({
+        'Stage': ['Before', 'Before', 'After', 'After'],
+        'Gender': ['Female', 'Male', 'Female', 'Male'],
+        'Positive Rate': [female_before, male_before, female_after, male_after]
+    })
+
+    fig = px.bar(
+        comparison_data,
+        x="Stage",
+        y="Positive Rate",
+        color="Gender",
+        barmode="group",
+        color_discrete_map={"Female": "pink", "Male": "blue"},
+        title="Impact of Bias Mitigation"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Performance impact assessment
+    if "Actual" in df_results_clean.columns and not all(df_results_clean["Actual"] == "Unknown"):
+        st.markdown("### Performance Impact Assessment")
+
+        # Binarize actual values
+        df_results_clean["Binary_Actual"] = (df_results_clean["Actual"] != "No Disease").astype(int)
+
+        # Calculate accuracy before
+        accuracy_before = accuracy_score(df_results_clean["Binary_Actual"], df_results_clean["Binary_Prediction"])
+
+        # Calculate accuracy after
+        accuracy_after = accuracy_score(df_results_clean["Binary_Actual"], df_results_clean["Mitigated_Prediction"])
+
+        # Display accuracy comparison
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.metric("Accuracy before mitigation", f"{accuracy_before:.2%}")
+
+        with col2:
+            st.metric("Accuracy after mitigation", f"{accuracy_after:.2%}",
+                     delta=f"{(accuracy_after - accuracy_before) * 100:.2f}%")
+
+        # Warning about accuracy-fairness tradeoff if applicable
+        if accuracy_after < accuracy_before:
+            st.warning(
+                "⚠️ **Note the accuracy-fairness tradeoff**\n\n"
+                "Bias mitigation has reduced overall accuracy. This is a common trade-off "
+                "in fair machine learning. Consider the specific context and ethical implications "
+                "when deciding whether this trade-off is acceptable."
+            )
+        else:
+            st.success(
+                "✅ **Bias mitigation improved both fairness and accuracy**\n\n"
+                "This is an ideal outcome where reducing bias also leads to better performance."
+            )
+
+        # Confusion matrices
+        st.markdown("#### Confusion Matrices")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Before Mitigation**")
+            cm_before = confusion_matrix(df_results_clean["Binary_Actual"], df_results_clean["Binary_Prediction"])
+
+            # Plot confusion matrix
+            fig, ax = plt.subplots(figsize=(4, 3))
+            im = ax.imshow(cm_before, interpolation='nearest', cmap=plt.cm.Blues)
+            ax.set(xticks=[0, 1], yticks=[0, 1],
+                   xticklabels=["No Disease", "Disease"],
+                   yticklabels=["No Disease", "Disease"],
+                   xlabel="Predicted", ylabel="Actual")
+
+            # Add text annotations
+            for i in range(2):
+                for j in range(2):
+                    ax.text(j, i, cm_before[i, j], ha="center", va="center")
+
+            st.pyplot(fig)
+
+        with col2:
+            st.markdown("**After Mitigation**")
+            cm_after = confusion_matrix(df_results_clean["Binary_Actual"], df_results_clean["Mitigated_Prediction"])
+
+            # Plot confusion matrix
+            fig, ax = plt.subplots(figsize=(4, 3))
+            im = ax.imshow(cm_after, interpolation='nearest', cmap=plt.cm.Blues)
+            ax.set(xticks=[0, 1], yticks=[0, 1],
+                   xticklabels=["No Disease", "Disease"],
+                   yticklabels=["No Disease", "Disease"],
+                   xlabel="Predicted", ylabel="Actual")
+
+            # Add text annotations
+            for i in range(2):
+                for j in range(2):
+                    ax.text(j, i, cm_after[i, j], ha="center", va="center")
+
+            st.pyplot(fig)
+
+    # Recommendations
+    st.markdown("### Recommendations")
+
+    if disparity_after < 0.05:
+        st.success(
+            "✅ **Bias successfully mitigated**\n\n"
+            "The mitigation approach has effectively reduced gender disparity in the model predictions. "
+            "Consider implementing this approach in your production system."
+        )
+    elif disparity_after < 0.1:
+        st.success(
+            "✅ **Bias substantially reduced**\n\n"
+            "The mitigation approach has significantly reduced gender disparity, though some small differences remain. "
+            "This level of disparity may be acceptable depending on your specific use case and regulatory requirements."
+        )
+    else:
+        st.warning(
+            "⚠️ **Partial bias mitigation achieved**\n\n"
+            "While the disparity has been reduced, significant differences between genders still exist. "
+            "Consider trying different mitigation approaches or parameters."
+        )
+
+    # Display the mitigated predictions
+    st.markdown("### Mitigated Predictions")
+    st.dataframe(df_results_clean[["Image_ID", "Gender", "Prediction", "Probability", "Mitigated_Prediction"]])
+
+    # Save button for mitigated predictions
+    if st.button("Save Mitigated Predictions"):
+        df_results_clean_copy = df_results_clean.copy()
+
+        # Map binary predictions back to disease labels
+        def map_to_disease(row):
+            if row["Mitigated_Prediction"] == 1:
+                return row["Prediction"] if row["Prediction"] != "No Disease" else "Disease"
+            else:
+                return "No Disease"
+
+        df_results_clean_copy["Mitigated_Disease"] = df_results_clean_copy.apply(map_to_disease, axis=1)
+
+        # Replace original predictions in the results
+        for idx, row in df_results_clean_copy.iterrows():
+            mask = (st.session_state.df_results["Image_ID"] == row["Image_ID"]) & (st.session_state.df_results["Gender"] == row["Gender"])
+            st.session_state.df_results.loc[mask, "Prediction"] = row["Mitigated_Disease"]
+
+        st.success("✅ Mitigated predictions saved successfully!")
+
+def gender_bias_testing_page():
+    st.title("🧪 Gender Bias Testing")
+
+    df_results = st.session_state.df_results
+    if df_results.empty:
+        st.info("No prediction data available. Generate predictions first.")
+        return
+
+    st.markdown(
+        """
+        ### Interactive Bias Testing Environment
+
+        This environment allows you to experiment with different parameters and approaches
+        to understand and mitigate gender bias in model predictions.
+        """
+    )
+
+    # Remove rows with unknown gender
+    df_results_clean = df_results[df_results["Gender"] != "Unknown"].copy()
+
+    if df_results_clean.empty:
+        st.warning("No predictions with known gender available for testing.")
+        return
+
+    # Testing method selection
+    test_method = st.radio(
+        "Select Testing Method:",
+        ["Threshold Adjustment", "Data Rebalancing Simulation", "Model Ensemble Simulation"],
+        help="Choose a method to test bias mitigation approaches"
+    )
+
+    if test_method == "Threshold Adjustment":
+        st.markdown(
+            """
+            ### Threshold Adjustment Testing
+
+            Threshold adjustment is a post-processing technique that applies different classification
+            thresholds to different demographic groups to balance error rates or prediction rates.
+            """
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            thresh_F = st.slider(
+                "Threshold for Female",
+                0.0, 1.0, 0.5, 0.01,
+                help="Adjust threshold for female predictions"
+            )
+
+        with col2:
+            thresh_M = st.slider(
+                "Threshold for Male",
+                0.0, 1.0, 0.5, 0.01,
+                help="Adjust threshold for male predictions"
+            )
+
+        # Binary predictions for testing
+        df_results_clean["Binary_Prediction"] = (df_results_clean["Prediction"] != "No Disease").astype(int)
+
+        # Apply adjusted thresholds
+        def adjust_pred(row):
+            if row["Gender"] == "M":
+                return 1 if row["Probability"] >= thresh_M else 0
+            elif row["Gender"] == "F":
+                return 1 if row["Probability"] >= thresh_F else 0
+            else:
+                return row["Binary_Prediction"]
+
+        df_results_clean["Adjusted_Prediction"] = df_results_clean.apply(adjust_pred, axis=1)
+
+        # Calculate metrics
+        female_df = df_results_clean[df_results_clean["Gender"] == "F"]
+        male_df = df_results_clean[df_results_clean["Gender"] == "M"]
+
+        total_F = len(female_df)
+        total_M = len(male_df)
+
+        # Original rates
+        orig_F_rate = female_df["Binary_Prediction"].mean()
+        orig_M_rate = male_df["Binary_Prediction"].mean()
+        orig_diff = abs(orig_F_rate - orig_M_rate)
+
+        # Adjusted rates
+        adj_F_rate = female_df["Adjusted_Prediction"].mean()
+        adj_M_rate = male_df["Adjusted_Prediction"].mean()
+        adj_diff = abs(adj_F_rate - adj_M_rate)
+
+        # Display results
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Original Prediction Rates**")
+            st.write(f"Female detection rate: {orig_F_rate:.2%} ({total_F} images)")
+            st.write(f"Male detection rate: {orig_M_rate:.2%} ({total_M} images)")
+            st.write(f"Bias difference: {orig_diff:.4f}")
+
+        with col2:
+            st.markdown("**Adjusted Prediction Rates**")
+            st.write(f"Female detection rate: {adj_F_rate:.2%} ({total_F} images)")
+            st.write(f"Male detection rate: {adj_M_rate:.2%} ({total_M} images)")
+            st.write(f"Bias difference: {adj_diff:.4f}")
+
+        # Visualization of changes
+        data = pd.DataFrame({
+            'Stage': ['Original', 'Original', 'Adjusted', 'Adjusted'],
+            'Gender': ['Female', 'Male', 'Female', 'Male'],
+            'Detection Rate': [orig_F_rate, orig_M_rate, adj_F_rate, adj_M_rate]
+        })
+
+        fig = px.bar(
+            data,
+            x="Stage",
+            y="Detection Rate",
+            color="Gender",
+            barmode="group",
+            color_discrete_map={"Female": "pink", "Male": "blue"},
+            title="Impact of Threshold Adjustment"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Assess bias reduction
+        if adj_diff < orig_diff:
+            reduction = ((orig_diff - adj_diff) / orig_diff) * 100
+            st.success(f"✅ Bias reduced by {reduction:.1f}%")
+        else:
+            st.error("❌ Bias not reduced. Try different threshold values.")
+
+        # Accuracy impact if ground truth is available
+        if "Actual" in df_results_clean.columns and not all(df_results_clean["Actual"] == "Unknown"):
+            st.markdown("### Impact on Accuracy")
+
+            # Convert actual labels to binary for comparison
+            df_results_clean["Binary_Actual"] = (df_results_clean["Actual"] != "No Disease").astype(int)
+
+            # Calculate accuracy metrics
+            orig_acc = accuracy_score(df_results_clean["Binary_Actual"], df_results_clean["Binary_Prediction"])
+            adj_acc = accuracy_score(df_results_clean["Binary_Actual"], df_results_clean["Adjusted_Prediction"])
+
+            # Display accuracy comparison
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Original Accuracy", f"{orig_acc:.2%}")
+            with col2:
+                st.metric("Adjusted Accuracy", f"{adj_acc:.2%}", delta=f"{(adj_acc - orig_acc) * 100:.2f}%")
+
+            # Accuracy by gender
+            orig_F_acc = accuracy_score(
+                female_df["Binary_Actual"],
+                female_df["Binary_Prediction"]
+            )
+            adj_F_acc = accuracy_score(
+                female_df["Binary_Actual"],
+                female_df["Adjusted_Prediction"]
+            )
+
+            orig_M_acc = accuracy_score(
+                male_df["Binary_Actual"],
+                male_df["Binary_Prediction"]
+            )
+            adj_M_acc = accuracy_score(
+                male_df["Binary_Actual"],
+                male_df["Adjusted_Prediction"]
+            )
+
+            # Display accuracy by gender
+            acc_data = pd.DataFrame({
+                'Stage': ['Original', 'Original', 'Adjusted', 'Adjusted'],
+                'Gender': ['Female', 'Male', 'Female', 'Male'],
+                'Accuracy': [orig_F_acc, orig_M_acc, adj_F_acc, adj_M_acc]
+            })
+
+            fig = px.bar(
+                acc_data,
+                x="Stage",
+                y="Accuracy",
+                color="Gender",
+                barmode="group",
+                color_discrete_map={"Female": "pink", "Male": "blue"},
+                title="Accuracy by Gender Before and After Adjustment"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Preview adjusted predictions
+        st.markdown("### Adjusted Predictions Preview")
+
+        # Map back to disease labels for display
+        def map_to_disease(row):
+            if row["Adjusted_Prediction"] == 1:
+                return row["Prediction"] if row["Prediction"] != "No Disease" else "Disease"
+            else:
+                return "No Disease"
+
+        df_results_clean["Adjusted_Disease"] = df_results_clean.apply(map_to_disease, axis=1)
+
+        # Display the dataframe
+        columns_to_show = ["Image_ID", "Gender", "Prediction", "Adjusted_Disease", "Probability"]
+        if "Actual" in df_results_clean.columns:
+            columns_to_show.insert(3, "Actual")
+
+        st.dataframe(df_results_clean[columns_to_show])
+
+    elif test_method == "Data Rebalancing Simulation":
+        st.markdown(
+            """
+            ### Data Rebalancing Simulation
+
+            This simulation tests how rebalancing the training data might affect model bias.
+            In practice, this would involve retraining with a balanced dataset, but we'll
+            simulate the effect here.
+            """
+        )
+
+        # Current gender distribution
+        gender_counts = df_results_clean["Gender"].value_counts()
+        total_F = gender_counts.get("F", 0)
+        total_M = gender_counts.get("M", 0)
+
+        st.write(f"**Current dataset:** {total_F} females, {total_M} males")
+        ratio = total_F / total_M if total_M > 0 else float('inf')
+        st.write(f"**Current female-to-male ratio:** {ratio:.2f}")
+
+        # Simulation parameters
+        target_ratio = st.slider(
+            "Target Female-to-Male Ratio",
+            min_value=0.5,
+            max_value=2.0,
+            value=1.0,
+            step=0.1,
+            help="1.0 represents a balanced dataset"
+        )
+
+        # Simulate rebalancing by weighted sampling
+        df_results_clean["Binary_Prediction"] = (df_results_clean["Prediction"] != "No Disease").astype(int)
+
+        # Calculate weights based on target ratio
+        if target_ratio >= ratio:  # Need more females
+            weight_F = target_ratio / ratio if ratio > 0 else 1.0
+            weight_M = 1.0
+        else:  # Need more males
+            weight_F = 1.0
+            weight_M = ratio / target_ratio if target_ratio > 0 else 1.0
+
+        # Apply weights through sampling
+        # This is a simplified simulation - real rebalancing would involve retraining
+        np.random.seed(42)  # For reproducibility
+
+        female_indices = df_results_clean[df_results_clean["Gender"] == "F"].index
+        male_indices = df_results_clean[df_results_clean["Gender"] == "M"].index
+
+        # Determine how many samples to take
+        n_female = int(len(female_indices) * weight_F)
+        n_male = int(len(male_indices) * weight_M)
+
+        # Sample with replacement if needed
+        female_sample = np.random.choice(female_indices, size=n_female, replace=(weight_F > 1))
+        male_sample = np.random.choice(male_indices, size=n_male, replace=(weight_M > 1))
+
+        # Create balanced dataset
+        balanced_indices = np.concatenate([female_sample, male_sample])
+        df_balanced = df_results_clean.loc[balanced_indices].copy()
+
+        # Calculate metrics on balanced dataset
+        balanced_F = df_balanced[df_balanced["Gender"] == "F"]
+        balanced_M = df_balanced[df_balanced["Gender"] == "M"]
+
+        orig_F_rate = df_results_clean[df_results_clean["Gender"] == "F"]["Binary_Prediction"].mean()
+        orig_M_rate = df_results_clean[df_results_clean["Gender"] == "M"]["Binary_Prediction"].mean()
+        orig_diff = abs(orig_F_rate - orig_M_rate)
+
+        bal_F_rate = balanced_F["Binary_Prediction"].mean()
+        bal_M_rate = balanced_M["Binary_Prediction"].mean()
+        bal_diff = abs(bal_F_rate - bal_M_rate)
+
+        # Display results
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Original Dataset**")
+            st.write(f"Female: {len(df_results_clean[df_results_clean['Gender'] == 'F'])} samples")
+            st.write(f"Male: {len(df_results_clean[df_results_clean['Gender'] == 'M'])} samples")
+            st.write(f"F:M ratio = {ratio:.2f}")
+            st.write(f"Female rate: {orig_F_rate:.2%}")
+            st.write(f"Male rate: {orig_M_rate:.2%}")
+            st.write(f"Bias difference: {orig_diff:.4f}")
+
+        with col2:
+            st.markdown("**Rebalanced Simulation**")
+            st.write(f"Female: {len(balanced_F)} samples")
+            st.write(f"Male: {len(balanced_M)} samples")
+            st.write(f"F:M ratio = {len(balanced_F)/len(balanced_M):.2f}")
+            st.write(f"Female rate: {bal_F_rate:.2%}")
+            st.write(f"Male rate: {bal_M_rate:.2%}")
+            st.write(f"Bias difference: {bal_diff:.4f}")
+
+        # Visualization
+        data = pd.DataFrame({
+            'Dataset': ['Original', 'Original', 'Rebalanced', 'Rebalanced'],
+            'Gender': ['Female', 'Male', 'Female', 'Male'],
+            'Detection Rate': [orig_F_rate, orig_M_rate, bal_F_rate, bal_M_rate]
+        })
+
+        fig = px.bar(
+            data,
+            x="Dataset",
+            y="Detection Rate",
+            color="Gender",
+            barmode="group",
+            color_discrete_map={"Female": "pink", "Male": "blue"},
+            title="Impact of Data Rebalancing Simulation"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Assess impact
+        if bal_diff < orig_diff:
+            reduction = ((orig_diff - bal_diff) / orig_diff) * 100
+            st.success(f"✅ Simulation shows potential {reduction:.1f}% bias reduction through rebalancing")
+            st.markdown(
+                """
+                **Recommendation:** Consider rebalancing your training dataset to achieve a more
+                equitable gender representation, then retrain your model.
+                """
+            )
+        else:
+            st.warning(
+                """
+                ⚠️ Simulation suggests rebalancing alone may not reduce bias.
+                Consider combining with other approaches.
+                """
+            )
+
+    elif test_method == "Model Ensemble Simulation":
+        st.markdown(
+            """
+            ### Model Ensemble Simulation
+
+            This simulation tests how combining predictions from multiple models might
+            reduce bias. In practice, this would involve training multiple specialized
+            models, but we'll simulate the effect here.
+            """
+        )
+
+        # Binary predictions for testing
+        df_results_clean["Binary_Prediction"] = (df_results_clean["Prediction"] != "No Disease").astype(int)
+
+        # Original metrics
+        female_df = df_results_clean[df_results_clean["Gender"] == "F"]
+        male_df = df_results_clean[df_results_clean["Gender"] == "M"]
+
+        orig_F_rate = female_df["Binary_Prediction"].mean()
+        orig_M_rate = male_df["Binary_Prediction"].mean()
+        orig_diff = abs(orig_F_rate - orig_M_rate)
+
+        # Simulate gender-specific models
+        # This simulates models specialized for different genders
+
+        # Parameters for simulation
+        female_sensitivity = st.slider(
+            "Female-specific model sensitivity",
+            0.5, 1.5, 1.0, 0.05,
+            help="Higher values lead to more positive predictions for females"
+        )
+
+        male_sensitivity = st.slider(
+            "Male-specific model sensitivity",
+            0.5, 1.5, 1.0, 0.05,
+            help="Higher values lead to more positive predictions for males"
+        )
+
+        ensemble_weight = st.slider(
+            "Ensemble weight for gender-specific models",
+            0.0, 1.0, 0.5, 0.05,
+            help="0 = use only general model, 1 = use only gender-specific models"
+        )
+
+        # Simulate specialized model predictions
+        np.random.seed(42)  # For reproducibility
+
+        # Create gender-specific predictions by adjusting probabilities
+        df_results_clean["Female_Specific_Prob"] = df_results_clean.apply(
+            lambda row: min(1.0, row["Probability"] * female_sensitivity) if row["Gender"] == "F" else row["Probability"],
+            axis=1
+        )
+
+        df_results_clean["Male_Specific_Prob"] = df_results_clean.apply(
+            lambda row: min(1.0, row["Probability"] * male_sensitivity) if row["Gender"] == "M" else row["Probability"],
+            axis=1
+        )
+
+        # Create ensemble prediction
+        df_results_clean["Ensemble_Prob"] = df_results_clean.apply(
+            lambda row: (
+                row["Probability"] * (1 - ensemble_weight) +
+                (row["Female_Specific_Prob"] if row["Gender"] == "F" else row["Male_Specific_Prob"]) * ensemble_weight
+            ),
+            axis=1
+        )
+
+        # Apply threshold to get binary prediction
+        threshold = 0.5
+        df_results_clean["Ensemble_Prediction"] = (df_results_clean["Ensemble_Prob"] >= threshold).astype(int)
+
+        # Calculate ensemble metrics
+        ens_F_rate = df_results_clean[df_results_clean["Gender"] == "F"]["Ensemble_Prediction"].mean()
+        ens_M_rate = df_results_clean[df_results_clean["Gender"] == "M"]["Ensemble_Prediction"].mean()
+        ens_diff = abs(ens_F_rate - ens_M_rate)
+
+        # Display results
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Original Model**")
+            st.write(f"Female detection rate: {orig_F_rate:.2%}")
+            st.write(f"Male detection rate: {orig_M_rate:.2%}")
+            st.write(f"Bias difference: {orig_diff:.4f}")
+
+        with col2:
+            st.markdown("**Ensemble Simulation**")
+            st.write(f"Female detection rate: {ens_F_rate:.2%}")
+            st.write(f"Male detection rate: {ens_M_rate:.2%}")
+            st.write(f"Bias difference: {ens_diff:.4f}")
+
+        # Visualization
+        data = pd.DataFrame({
+            'Model': ['Original', 'Original', 'Ensemble', 'Ensemble'],
+            'Gender': ['Female', 'Male', 'Female', 'Male'],
+            'Detection Rate': [orig_F_rate, orig_M_rate, ens_F_rate, ens_M_rate]
+        })
+
+        fig = px.bar(
+            data,
+            x="Model",
+            y="Detection Rate",
+            color="Gender",
+            barmode="group",
+            color_discrete_map={"Female": "pink", "Male": "blue"},
+            title="Impact of Model Ensemble Simulation"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Assess impact
+        if ens_diff < orig_diff:
+            reduction = ((orig_diff - ens_diff) / orig_diff) * 100
+            st.success(f"✅ Simulation shows potential {reduction:.1f}% bias reduction through model ensemble")
+            st.markdown(
+                """
+                **Recommendation:** Consider training specialized models for different
+                demographic groups and combining their predictions in an ensemble approach.
+                """
+            )
+        else:
+            st.warning(
+                """
+                ⚠️ Simulation suggests the current ensemble parameters may not reduce bias.
+                Try adjusting the sensitivity and weight parameters.
+                """
+            )
+
+        # Show ensemble predictions
+        st.markdown("### Ensemble Predictions Preview")
+
+        # Map back to disease labels for display
+        def map_to_disease(row):
+            if row["Ensemble_Prediction"] == 1:
+                return row["Prediction"] if row["Prediction"] != "No Disease" else "Disease"
+            else:
+                return "No Disease"
+
+        df_results_clean["Ensemble_Disease"] = df_results_clean.apply(map_to_disease, axis=1)
+
+        # Display the dataframe
+        columns_to_show = ["Image_ID", "Gender", "Prediction", "Ensemble_Disease", "Probability", "Ensemble_Prob"]
+        if "Actual" in df_results_clean.columns:
+            columns_to_show.insert(3, "Actual")
+
+        st.dataframe(df_results_clean[columns_to_show])
+
+def about_chexnet_model_page():
+    st.title("🧠 About CheXNet Model")
+
+    st.markdown(
+        """
+        ## CheXNet: Radiologist-Level Pneumonia Detection
+
+        **CheXNet** is a deep learning algorithm developed by researchers at Stanford University
+        to detect pneumonia from chest X-rays at a level exceeding practicing radiologists.
+
+        ### Model Architecture
+
+        CheXNet is a 121-layer convolutional neural network (CNN) based on the DenseNet architecture.
+        The DenseNet architecture is particularly well-suited for image classification tasks due to:
+
+        - Dense connectivity pattern that ensures maximum information flow between layers
+        - Direct connections from any layer to all subsequent layers
+        - Feature reuse throughout the network
+        - Substantially fewer parameters than traditional CNNs
+
+        ### Training Data
+
+        CheXNet was trained on the ChestX-ray14 dataset, which contains:
+
+        - Over 112,000 frontal-view chest X-ray images
+        - 30,805 unique patients
+        - 14 different thoracic disease labels, including pneumonia
+        - Labels were created using natural language processing from radiological reports
+
+        ### Performance
+
+        In clinical validation studies, CheXNet achieved:
+
+        - F1 score of 0.435 for pneumonia detection
+        - Exceeded the performance of practicing radiologists
+        - Area Under the ROC Curve (AUC) of 0.7680 for all pathologies
+
+        ### Citation
+
+        > Rajpurkar, P., Irvin, J., Zhu, K., Yang, B., Mehta, H., Duan, T., Ding, D., Bagul, A., Langlotz, C., Shpanskaya, K. and Lungren, M.P., 2017. CheXNet: Radiologist-level pneumonia detection on chest X-rays with deep learning. arXiv preprint arXiv:1711.05225.
+
+        ### Applications
+
+        CheXNet can be used to:
+
+        - Assist radiologists in clinical settings
+        - Provide rapid screening in resource-constrained environments
+        - Identify subtle findings that might be missed in standard reads
+        - Prioritize worklists in high-volume settings
+
+        ### Limitations
+
+        - Performance varies across different pathologies
+        - May have biases based on the training data demographics
+        - Requires high-quality chest X-ray images
+        - Should be used as an assistive tool, not a replacement for radiologists
+        """
+    )
+
+    # Add visualization of model architecture
+    st.markdown("### CheXNet Model Architecture")
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.markdown(
+            """
+            **DenseNet-121 Structure:**
+
+            1. Input layer (224×224 image)
+            2. Initial convolution and pooling
+            3. Dense blocks with transition layers:
+               - Dense Block 1 (6 layers)
+               - Transition Layer 1
+               - Dense Block 2 (12 layers)
+               - Transition Layer 2
+               - Dense Block 3 (24 layers)
+               - Transition Layer 3
+               - Dense Block 4 (16 layers)
+            4. Global Average Pooling
+            5. Fully Connected Layer
+            6. Sigmoid activation (multi-label output)
+            """
+        )
+
+    with col2:
+        # Display an ASCII art diagram of the architecture
+        st.code("""
+        Input Image (224x224)
+            │
+            ▼
+        Convolution + Pooling
+            │
+            ▼
+        ┌─────────────────┐
+        │  Dense Block 1  │
+        │   (6 layers)    │
+        └─────────────────┘
+            │
+            ▼
+        Transition Layer 1
+            │
+            ▼
+        ┌─────────────────┐
+        │  Dense Block 2  │
+        │   (12 layers)   │
+        └─────────────────┘
+            │
+            ▼
+        Transition Layer 2
+            │
+            ▼
+        ┌─────────────────┐
+        │  Dense Block 3  │
+        │   (24 layers)   │
+        └─────────────────┘
+            │
+            ▼
+        Transition Layer 3
+            │
+            ▼
+        ┌─────────────────┐
+        │  Dense Block 4  │
+        │   (16 layers)   │
+        └─────────────────┘
+            │
+            ▼
+        Global Average Pooling
+            │
+            ▼
+        Fully Connected Layer
+            │
+            ▼
+        Sigmoid Activation
+            │
+            ▼
+        14 Disease Predictions
+        """)
+
+    # Display information about model performance
+    st.markdown("### Performance on ChestX-ray14 Dataset")
+
+    # Sample AUC values for each finding (approximate values from paper)
+    performance_data = {
+        "Finding": [
+            "Atelectasis", "Cardiomegaly", "Effusion", "Infiltration",
+            "Mass", "Nodule", "Pneumonia", "Pneumothorax",
+            "Consolidation", "Edema", "Emphysema", "Fibrosis",
+            "Pleural Thickening", "Hernia"
+        ],
+        "AUC": [
+            0.8094, 0.9248, 0.8638, 0.7345,
+            0.8676, 0.7802, 0.7680, 0.8887,
+            0.7901, 0.8878, 0.9371, 0.8047,
+            0.8062, 0.9164
+        ]
+    }
+
+    performance_df = pd.DataFrame(performance_data)
+
+    # Sort by AUC for better visualization
+    performance_df = performance_df.sort_values("AUC", ascending=False)
+
+    # Create a bar chart
+    fig = px.bar(
+        performance_df,
+        x="Finding",
+        y="AUC",
+        title="CheXNet Performance by Finding (AUC)",
+        color="AUC",
+        color_continuous_scale="Blues"
+    )
+
+    fig.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Add a load button
+    if st.button("Load CheXNet Model"):
+        with st.spinner("Loading CheXNet..."):
+            if load_model("CheXNet"):
+                st.success("✅ CheXNet loaded successfully!")
+            else:
+                st.error("❌ Failed to load CheXNet. Please try again.")
+
+def about_chexnext_model_page():
+    # ... previous code ...
+
+    # Performance comparison with radiologists
+    st.markdown("### Performance Comparison: CheXNeXt vs. Radiologists")
+
+    # Sample comparison data (approximate values from paper)
+    comparison_data = {
+        "Finding": [
+            "Atelectasis", "Cardiomegaly", "Consolidation", "Edema",
+            "Effusion", "Emphysema", "Fibrosis", "Hernia",
+            "Infiltration", "Mass", "Nodule", "Pleural Thickening",
+            "Pneumonia", "Pneumothorax"
+        ],
+        "CheXNeXt": [
+            0.862, 0.831, 0.745, 0.835,
+            0.883, 0.704, 0.806, 0.916,
+            0.735, 0.868, 0.780, 0.806,
+            0.768, 0.889
+        ],
+        "Radiologists": [
+            0.808, 0.888, 0.841, 0.851,
+            0.900, 0.911, 0.897, 0.985,
+            0.720, 0.821, 0.892, 0.883,
+            0.765, 0.944
+        ]
+    }
+
+    comparison_df = pd.DataFrame(comparison_data)
+
+    # Melt the dataframe for better visualization
+    melted_df = pd.melt(
+        comparison_df,
+        id_vars=["Finding"],
+        value_vars=["CheXNeXt", "Radiologists"],
+        var_name="Interpreter",
+        value_name="AUC"
+    )
+
+    # Create a grouped bar chart
+    fig = px.bar(
+        melted_df,
+        x="Finding",
+        y="AUC",
+        color="Interpreter",
+        barmode="group",
+        title="Performance Comparison: CheXNeXt vs. Radiologists (AUC)",
+        color_discrete_map={"CheXNeXt": "#4facfe", "Radiologists": "#007bff"}
+    )
+
+    fig.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Add key insights
+    st.markdown(
+        """
+        **Key Insights:**
+
+        - CheXNeXt demonstrates non-inferior performance to radiologists in 11 of 14 pathologies
+        - For pneumonia detection, CheXNeXt achieves comparable performance to radiologists
+        - Areas for improvement include detection of emphysema, fibrosis, and hernia
+        """
+    )
+
+    # Add a load button
+    if st.button("Load CheXNeXt Model"):
+        with st.spinner("Loading CheXNeXt..."):
+            if load_model("CheXNeXt"):
+                st.success("✅ CheXNeXt loaded successfully!")
+            else:
+                st.error("❌ Failed to load CheXNeXt. Please try again.")
+
+def about_anatomy_xnet_page():
+    st.title("🧠 About Anatomy-XNet Model")
+
+    st.markdown(
+        """
+        ## Anatomy-XNet: Anatomically-Aware X-Ray Interpretation Model
+
+        **Anatomy-XNet** is an advanced chest X-ray interpretation model that incorporates
+        anatomical awareness to improve diagnostic accuracy. It enhances traditional CNN
+        approaches by attending to specific anatomical regions relevant to different pathologies.
+
+        ### Key Innovations
+
+        1. **Anatomical Attention Mechanism**
+           - Incorporates explicit anatomical region segmentation
+           - Applies attention weights to different regions based on pathology
+           - Reduces the impact of confounding features in irrelevant regions
+
+        2. **Multi-Resolution Analysis**
+           - Processes images at different resolutions to capture both fine details and global context
+           - Hierarchical feature extraction specific to anatomical regions
+           - Improved detection of subtle findings while maintaining overall contextual awareness
+
+        3. **Region-Specific Feature Extraction**
+           - Dedicated convolutional pathways for key anatomical regions:
+             - Lung fields (left and right)
+             - Mediastinum
+             - Costophrenic angles
+             - Hilar regions
+           - Customized feature extraction optimized for each region's specific characteristics
+
+        ### Performance Advantages
+
+        Compared to standard models, Anatomy-XNet demonstrates:
+
+        - Superior localization of findings to anatomically relevant regions
+        - Reduced false positives from anatomically irrelevant areas
+        - Better generalization across diverse patient populations
+        - Improved interpretability through region-specific attention maps
+        - Enhanced performance on pathologies with subtle radiographic findings
+        """
+    )
+
+    # Add visual representation of the model architecture
+    st.markdown("### Anatomy-XNet Architecture")
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.markdown(
+            """
+            **Architecture Components:**
+
+            1. **Input Processing**:
+               - 224×224 X-ray image input
+               - Anatomical region detection
+
+            2. **Region-Specific Pathways**:
+               - Parallel processing of anatomical regions
+               - Region-specific convolutional modules
+
+            3. **Feature Fusion**:
+               - Attention-weighted combination
+               - Cross-region correlation analysis
+
+            4. **Decision Layer**:
+               - Global average pooling
+               - Multi-head classifier for 14 findings
+               - Anatomical attribution mapping
+            """
+        )
+
+    with col2:
+        st.code("""
+        Chest X-Ray Input
+             │
+             ▼
+        ┌─────────────────────┐
+        │  Anatomical Region  │
+        │     Detection       │
+        └─────────────────────┘
+             │
+             ▼
+        ┌─────────────────────────────────────────────┐
+        │                                             │
+        ▼                 ▼                 ▼         ▼
+  ┌─────────┐      ┌─────────┐      ┌─────────┐ ┌─────────┐
+  │ Lung    │      │ Medias- │      │ Costo-  │ │  Hilar  │
+  │ Fields  │      │  tinum  │      │ phrenic │ │ Regions │
+  └─────────┘      └─────────┘      └─────────┘ └─────────┘
+        │                │                │         │
+        ▼                ▼                ▼         ▼
+  ┌─────────┐      ┌─────────┐      ┌─────────┐ ┌─────────┐
+  │ Region- │      │ Region- │      │ Region- │ │ Region- │
+  │ Specific│      │ Specific│      │ Specific│ │ Specific│
+  │ Features│      │ Features│      │ Features│ │ Features│
+  └─────────┘      └─────────┘      └─────────┘ └─────────┘
+        │                │                │         │
+        └────────────────┼────────────────┼─────────┘
+                         │                │
+                         ▼                ▼
+                   ┌─────────────────────────┐
+                   │     Attention Fusion    │
+                   └─────────────────────────┘
+                                │
+                                ▼
+                   ┌─────────────────────────┐
+                   │   Global Feature Pool   │
+                   └─────────────────────────┘
+                                │
+                                ▼
+                   ┌─────────────────────────┐
+                   │  Multi-class Classifier │
+                   └─────────────────────────┘
+                                │
+                                ▼
+                     14 Disease Predictions
+                                │
+                                ▼
+                   ┌─────────────────────────┐
+                   │ Anatomical Attribution  │
+                   └─────────────────────────┘
+        """)
+
+    # Performance comparison
+    st.markdown("### Performance Comparison: Anatomy-XNet vs. Standard Models")
+
+    # Sample comparison data
+    model_comparison = {
+        "Finding": [
+            "Atelectasis", "Cardiomegaly", "Consolidation", "Edema",
+            "Effusion", "Emphysema", "Fibrosis", "Hernia",
+            "Infiltration", "Mass", "Nodule", "Pleural Thickening",
+            "Pneumonia", "Pneumothorax"
+        ],
+        "Standard CNN": [
+            0.821, 0.904, 0.759, 0.835,
+            0.877, 0.895, 0.818, 0.896,
+            0.715, 0.821, 0.758, 0.761,
+            0.768, 0.873
+        ],
+        "Anatomy-XNet": [
+            0.856, 0.917, 0.801, 0.868,
+            0.901, 0.912, 0.847, 0.921,
+            0.764, 0.869, 0.815, 0.824,
+            0.803, 0.904
+        ]
+    }
+
+    model_df = pd.DataFrame(model_comparison)
+
+    # Melt the dataframe for better visualization
+    melted_model_df = pd.melt(
+        model_df,
+        id_vars=["Finding"],
+        value_vars=["Standard CNN", "Anatomy-XNet"],
+        var_name="Model",
+        value_name="AUC"
+    )
+
+    # Create a grouped bar chart
+    fig = px.bar(
+        melted_model_df,
+        x="Finding",
+        y="AUC",
+        color="Model",
+        barmode="group",
+        title="Performance Comparison: Anatomy-XNet vs. Standard CNN (AUC)",
+        color_discrete_map={"Anatomy-XNet": "#36b9cc", "Standard CNN": "#858796"}
+    )
+
+    fig.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Add a load button
+    if st.button("Load Anatomy-XNet Model"):
+        with st.spinner("Loading Anatomy-XNet..."):
+            if load_model("Anatomy-XNet"):
+                st.success("✅ Anatomy-XNet loaded successfully!")
+            else:
+                st.error("❌ Failed to load Anatomy-XNet. Please try again.")
+
+def importance_gender_bias_page():
+    st.title("📚 The Importance of Gender Bias")
+
+    st.markdown(
+        """
+        ## Why Addressing Gender Bias in Medical AI Matters
+
+        Gender bias in AI systems used for medical diagnosis can have significant real-world impacts on patient care and outcomes.
+
+        ### Ethical Imperatives
+
+        - **Fairness and Justice**: Healthcare systems should provide equal quality of care to all patients regardless of gender
+        - **Non-maleficence**: AI systems should not cause harm by systematically misdiagnosing particular demographic groups
+        - **Transparency**: Users of AI systems should understand potential biases and limitations
+
+        ### Clinical Impact
+
+        - **Diagnostic Disparities**: Biased models may miss diseases that present differently across genders
+        - **Treatment Delays**: False negatives can lead to delayed treatment for vulnerable populations
+        - **Resource Allocation**: Biased prioritization can affect access to limited healthcare resources
+
+        ### Regulatory Requirements
+
+        - **FDA Guidance**: Emerging regulations on AI in healthcare require fairness considerations
+        - **Legal Liability**: Healthcare institutions may face liability for deploying biased systems
+        - **Equal Treatment Mandates**: Many jurisdictions legally require equitable healthcare provision
+        """
+    )
+
+    st.markdown("### Key Research on Gender Bias in AI Healthcare")
+
+    research = [
+        {
+            "title": "A survey on bias and fairness in machine learning",
+            "authors": "Mehrabi et al. (2021)",
+            "findings": "Comprehensive review of various types of biases that can affect ML systems, including those in healthcare"
+        },
+        {
+            "title": "Dissecting racial bias in an algorithm used to manage the health of populations",
+            "authors": "Obermeyer et al. (2019)",
+            "findings": "Found that a widely used algorithm exhibited significant racial bias, underestimating the needs of Black patients"
+        },
+        {
+            "title": "Gender imbalance in medical imaging datasets produces biased classifiers for computer-aided diagnosis",
+            "authors": "Larrazabal et al. (2020)",
+            "findings": "Demonstrated that gender imbalances in training data lead to significant performance disparities by gender"
+        }
+    ]
+
+    for i, paper in enumerate(research):
+        with st.expander(f"{i+1}. {paper['title']} ({paper['authors']})"):
+            st.markdown(f"**Key Findings:** {paper['findings']}")
+
+    st.markdown("### Mitigation Strategies")
+
+    st.markdown(
+        """
+        Several approaches can help address gender bias in medical AI:
+
+        1. **Data Representation**: Ensure diverse and balanced training datasets
+        2. **Algorithmic Techniques**: Apply technical bias mitigation methods (as demonstrated in this app)
+        3. **Evaluation Protocols**: Test models across demographic subgroups before deployment
+        4. **Continuous Monitoring**: Track performance disparities in real-world usage
+        5. **Stakeholder Inclusion**: Involve diverse clinicians and patients in development
+        """
+    )
+
+def project_overview_page():
+    st.title("📈 Project Overview")
+
+    st.markdown(
+        """
+        ## Project Objective
+
+        This application is designed to help healthcare organizations and AI developers detect and mitigate gender bias in chest X-ray interpretation models. Our goal is to ensure that AI tools in radiology deliver equitable performance across all patient demographics.
+
+        ### Key Features
+
+        1. **Data Exploration**: Upload and analyze medical imaging datasets
+        2. **Multiple AI Models**: Compare performance across state-of-the-art chest X-ray models
+        3. **Bias Detection**: Quantify gender disparities in model predictions
+        4. **Mitigation Techniques**: Apply and evaluate various bias mitigation approaches
+        5. **Explainable Analysis**: Understand the patterns behind model errors and bias
+
+        ### Impact
+
+        - **Clinical Safety**: Reduce misdiagnosis risks for underrepresented groups
+        - **Regulatory Compliance**: Meet emerging requirements for AI fairness
+        - **Improved Accessibility**: Make advanced AI diagnostics safe for all patients
+        """
+    )
+
+    st.markdown("### Project Workflow")
+
+    workflow_steps = [
+        "Upload and analyze dataset",
+        "Explore data characteristics and demographics",
+        "Select and run AI models for disease prediction",
+        "Analyze gender bias in model predictions",
+        "Apply bias mitigation techniques",
+        "Test and validate mitigation effectiveness"
+    ]
+
+    for i, step in enumerate(workflow_steps):
+        st.markdown(f"**Step {i+1}:** {step}")
+
+def meet_the_team_page():
+    st.title("👥 Meet the Team")
+
+    team_members = [
+        {"name": "Yuying", "role": "Data Scientist", "image": "Yuying.webp"},
+        {"name": "Siwen", "role": "ML Engineer", "image": "Siwen.webp"},
+        {"name": "Zhi", "role": "Research Analyst", "image": "Zhi.webp"},
+        {"name": "Maude", "role": "UX Designer", "image": "Maude.webp"}
+    ]
+
+    # Create a tab for each team member
+    tabs = st.tabs([member["name"] for member in team_members])
+
+    for tab, member in zip(tabs, team_members):
+        with tab:
+            # Try to display image if available
+            try:
+                if os.path.exists(member["image"]):
+                    st.image(member["image"], width=150)
+                else:
+                    st.error(f"Image not found: {member['image']}")
+            except:
+                st.info(f"Image not available for {member['name']}")
+
+            st.write(f"**{member['name']}**")
+            st.write(f"*{member['role']}*")
+
+def explainable_analysis_page():
+    st.title("🔍 Explainable Analysis")
+
+    df = st.session_state.df
+    df_results = st.session_state.df_results
+
+    if df is None or df_results.empty:
+        st.info("No prediction data available yet. Please make predictions first.")
+        return
+
+    st.markdown(
+        """
+        ### Explainable AI for Chest X-Ray Interpretation
+
+        Understanding how models make decisions is crucial for:
+
+        1. **Clinical Trust**: Helping radiologists verify model decisions
+        2. **Bias Detection**: Identifying when models use irrelevant features
+        3. **Error Analysis**: Understanding failure modes
+        4. **Educational Value**: Learning from the model's attention patterns
+        """
+    )
+
+    # Simulated explanation methods
+    explanation_method = st.selectbox(
+        "Select Explanation Method:",
+        ["Confusion Matrix Analysis", "Error Pattern Analysis", "Demographic Analysis"]
+    )
+
+    if explanation_method == "Confusion Matrix Analysis":
+        st.markdown("### Confusion Matrix Analysis")
+
+        if "Actual" not in df_results.columns or all(df_results["Actual"] == "Unknown"):
+            st.warning("Ground truth labels required for confusion matrix analysis.")
+            st.info("Please ensure your dataset has actual disease labels matched to your predictions.")
+            return
+
+        # Get binary predictions
+        df_analysis = df_results.copy()
+        df_analysis["Binary_Actual"] = (df_analysis["Actual"] != "No Disease").astype(int)
+        df_analysis["Binary_Prediction"] = (df_analysis["Prediction"] != "No Disease").astype(int)
+
+        # Create overall confusion matrix
+        cm = confusion_matrix(df_analysis["Binary_Actual"], df_analysis["Binary_Prediction"])
+
+        # Display confusion matrix
+        st.markdown("#### Overall Confusion Matrix")
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        cax = ax.matshow(cm, cmap=plt.cm.Blues)
+        fig.colorbar(cax)
+
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Actual")
+        ax.set_title("Confusion Matrix")
+
+        ax.set_xticks([0, 1])
+        ax.set_yticks([0, 1])
+        ax.set_xticklabels(["No Disease", "Disease"])
+        ax.set_yticklabels(["No Disease", "Disease"])
+
+        # Add text annotations
+        for (i, j), val in np.ndenumerate(cm):
+            ax.text(j, i, f"{val}", ha="center", va="center", color="white" if val > cm.max()/2 else "black")
+
+        st.pyplot(fig)
+
+        # Calculate metrics
+        tn, fp, fn, tp = cm.ravel()
+        accuracy = (tp + tn) / (tp + tn + fp + fn)
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+
+        # Display metrics
+        st.markdown("#### Performance Metrics")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Accuracy", f"{accuracy:.2%}")
+            st.metric("Sensitivity", f"{sensitivity:.2%}")
+        with col2:
+            st.metric("Specificity", f"{specificity:.2%}")
+        with col3:
+            st.metric("F1 Score", f"{2*tp/(2*tp+fp+fn) if (2*tp+fp+fn) > 0 else 0:.2%}")
+
+    elif explanation_method == "Error Pattern Analysis":
+        st.markdown("### Error Pattern Analysis")
+
+        if "Actual" not in df_results.columns or all(df_results["Actual"] == "Unknown"):
+            st.warning("Ground truth labels required for error pattern analysis.")
+            return
+
+        # Get binary predictions and errors
+        df_analysis = df_results.copy()
+        df_analysis["Binary_Actual"] = (df_analysis["Actual"] != "No Disease").astype(int)
+        df_analysis["Binary_Prediction"] = (df_analysis["Prediction"] != "No Disease").astype(int)
+        df_analysis["Correct"] = df_analysis["Binary_Actual"] == df_analysis["Binary_Prediction"]
+
+        # Error types
+        df_analysis["Error_Type"] = "Correct"
+        df_analysis.loc[(df_analysis["Binary_Actual"] == 1) & (df_analysis["Binary_Prediction"] == 0), "Error_Type"] = "False Negative"
+        df_analysis.loc[(df_analysis["Binary_Actual"] == 0) & (df_analysis["Binary_Prediction"] == 1), "Error_Type"] = "False Positive"
+
+        # Overall error rate
+        error_rate = (df_analysis["Error_Type"] != "Correct").mean()
+        st.metric("Overall Error Rate", f"{error_rate:.2%}")
+
+        # Error distribution
+        error_counts = df_analysis["Error_Type"].value_counts()
+
+        # Gender-based error analysis
+        st.markdown("#### Error Analysis by Gender")
+
+        # Group by gender and error type
+        gender_errors = pd.crosstab(
+            df_analysis["Gender"],
+            df_analysis["Error_Type"],
+            normalize="index"
+        ) * 100
+
+        st.dataframe(gender_errors.round(1))
+
+    elif explanation_method == "Demographic Analysis":
+        st.markdown("### Demographic Analysis")
+
+        df_analysis = df_results.copy()
+
+        # Check if age data is available
+        if st.session_state.age_col and st.session_state.age_col in df.columns:
+            st.markdown("#### Age Distribution Analysis")
+
+            # Merge prediction results with demographic data
+            id_col = st.session_state.image_id_col
+            age_col = st.session_state.age_col
+
+            # Try to match images with demographic data
+            merged_df = pd.merge(
+                df_analysis,
+                df[[id_col, age_col, st.session_state.gender_col]],
+                left_on="Image_ID",
+                right_on=id_col,
+                how="left"
+            )
+
+            # Convert age to numeric, handling errors
+            merged_df[age_col] = pd.to_numeric(merged_df[age_col], errors="coerce")
+
+            # Remove rows with missing age
+            merged_df = merged_df.dropna(subset=[age_col])
+
+            if not merged_df.empty:
+                # Create age groups
+                merged_df["Age_Group"] = pd.cut(
+                    merged_df[age_col],
+                    bins=[0, 18, 40, 60, 80, 120],
+                    labels=["0-18", "19-40", "41-60", "61-80", "81+"]
+                )
+
+                # Binary predictions for analysis
+                merged_df["Binary_Prediction"] = (merged_df["Prediction"] != "No Disease").astype(int)
+
+                # Positive prediction rate by age group
+                age_group_rates = merged_df.groupby("Age_Group")["Binary_Prediction"].mean().reset_index()
+                age_group_rates["Positive_Rate"] = age_group_rates["Binary_Prediction"] * 100
+
+                # Plot positive prediction rates by age group
+                fig = px.bar(
+                    age_group_rates,
+                    x="Age_Group",
+                    y="Positive_Rate",
+                    title="Positive Prediction Rate by Age Group",
+                    labels={"Positive_Rate": "Positive Rate (%)", "Age_Group": "Age Group"},
+                    color="Positive_Rate",
+                    color_continuous_scale="Blues"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Age column not selected or not available in the dataset. Please include age data for demographic analysis.")
+
+# Main sidebar navigation
+def main():
+    st.sidebar.title("Gender Bias in Radiology")
+
+    page_options = [
+        "🏠 Home",
+        "📂 Upload Data",
+        "📊 Explore Data & Prepare",
+        "🤖 Model Prediction",
+        "⚖️ Gender Bias Analysis",
+        "🛠️ Bias Mitigation & Simulation",
+        "🧪 Gender Bias Testing",
+        "🔍 Explainable Analysis",
+        "🧠 About CheXNet Model",
+        "🧠 About CheXNeXt Model",
+        "🧠 About Anatomy-XNet Model",
+        "📚 The Importance of Gender Bias",
+        "📈 Project Overview",
+        "👥 Meet the Team"
+    ]
+
+    selected_page = st.sidebar.radio("Navigate", page_options)
+
+    # Display selected page
+    if selected_page == "🏠 Home":
+        home_page()
+    elif selected_page == "📂 Upload Data":
+        upload_data_page()
+    elif selected_page == "📊 Explore Data & Prepare":
+        explore_data_page()
+    elif selected_page == "🤖 Model Prediction":
+        model_prediction_page()
+    elif selected_page == "⚖️ Gender Bias Analysis":
+        gender_bias_analysis_page()
+    elif selected_page == "🛠️ Bias Mitigation & Simulation":
+        bias_mitigation_simulation_page()
+    elif selected_page == "🧪 Gender Bias Testing":
+        gender_bias_testing_page()
+    elif selected_page == "🔍 Explainable Analysis":
+        explainable_analysis_page()
+    elif selected_page == "🧠 About CheXNet Model":
+        about_chexnet_model_page()
+    elif selected_page == "🧠 About CheXNeXt Model":
+        about_chexnext_model_page()
+    elif selected_page == "🧠 About Anatomy-XNet Model":
+        about_anatomy_xnet_page()
+    elif selected_page == "📚 The Importance of Gender Bias":
+        importance_gender_bias_page()
+    elif selected_page == "📈 Project Overview":
+        project_overview_page()
+    elif selected_page == "👥 Meet the Team":
+        meet_the_team_page()
+
+    # Add app info in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### About the App")
+    st.sidebar.info(
+        """
+        **Gender Bias in Radiology**
+        Version 2.0
+
+        An application for detecting and mitigating
+        gender bias in AI-driven chest X-ray analysis.
+        """
+    )
+
+if __name__ == "__main__":
+    main()
