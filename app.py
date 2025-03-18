@@ -104,20 +104,21 @@ def load_chexagent_model():
     from transformers import AutoModelForCausalLM, AutoTokenizer
     model_name = "StanfordAIMI/CheXagent-2-3b"
     dtype = torch.bfloat16
-    device_agent = "cuda" if torch.cuda.is_available() else "cpu"
+    # Load CheXagent on CPU to reduce memory issues.
+    device_agent = "cpu"
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cpu", trust_remote_code=True)
     model = model.to(dtype)
     model.eval()
     return model, tokenizer, device_agent
 
 def chexagent_inference(image, prompt="Analyze the chest X‑ray image and return what you see along with the disease name detected."):
-    # Save image temporarily
+    # Save image temporarily.
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         image.save(tmp.name)
         tmp_path = tmp.name
     model_agent, tokenizer, device_agent = load_chexagent_model()
-    # Build input using the tokenizer's from_list_format and chat template.
+    # Build input using the tokenizer's methods.
     query = tokenizer.from_list_format([{'image': tmp_path}, {'text': prompt}])
     conv = [
         {"from": "system", "value": "You are a helpful assistant."},
@@ -131,7 +132,7 @@ def chexagent_inference(image, prompt="Analyze the chest X‑ray image and retur
         temperature=1.0,
         top_p=1.0,
         use_cache=True,
-        max_new_tokens=512
+        max_new_tokens=256  # Reduced for memory usage.
     )[0]
     response = tokenizer.decode(output[input_ids.size(1):-1])
     os.remove(tmp_path)
