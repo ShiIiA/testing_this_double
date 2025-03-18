@@ -614,11 +614,12 @@ def model_prediction_page():
     # ... (previous code)
 
                 # Calculate and display accuracy
-                if "Actual" in new_results_df.columns and not all(new_results_df["Actual"] == "Unknown"):
-                    accuracy = (new_results_df["Prediction"] == new_results_df["Actual"]).mean()
-                    st.markdown(f"**Batch Accuracy:** {accuracy:.2%}")
-    else:
-        st.info("Upload images to generate predictions.")
+    if "Actual" in new_results_df.columns and not all(new_results_df["Actual"] == "Unknown"):
+        accuracy = (new_results_df["Prediction"] == new_results_df["Actual"]).mean()
+        st.markdown(f"**Batch Accuracy:** {accuracy:.2%}")
+
+        else:
+          st.info("Upload images to generate predictions.")
 
 def gender_bias_analysis_page():
     st.title("⚖️ Gender Bias Analysis")
