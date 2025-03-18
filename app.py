@@ -1369,7 +1369,7 @@ def bias_mitigation_simulation_page():
 
     # Display the mitigated predictions
     st.markdown("### Mitigated Predictions")
-    st.dataframe(df_results_clean[["Image_ID", ""Gender", "Prediction", "Probability", "Mitigated_Prediction"]])
+    st.dataframe(df_results_clean[["Image_ID", "Gender", "Prediction", "Probability", "Mitigated_Prediction"]])
 
     # Save button for mitigated predictions
     if st.button("Save Mitigated Predictions"):
