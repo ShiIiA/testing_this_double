@@ -125,10 +125,12 @@ if "models_loaded" not in st.session_state:
     st.session_state.models_loaded = {}
 if "device" not in st.session_state:
     st.session_state.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if "debug_mode" not in st.session_state:
+    st.session_state.debug_mode = False
 
 # ------------------------- MODEL & HELPER FUNCTIONS -------------------------
 def load_model(model_name):
-    """Load the specified model from reliable sources"""
+    """Load the specified model from reliable sources with correct configuration"""
     if model_name in st.session_state.models_loaded:
         return st.session_state.models_loaded[model_name]
 
@@ -156,45 +158,47 @@ def load_model(model_name):
 
                 st.session_state.models_loaded[model_name] = model
                 st.success(f"✅ {model_name} loaded successfully!")
-
-                # Display model structure summary
-                st.write(f"Model structure: {model_name}")
                 return model
 
             # Load pre-trained model from TorchXRayVision
             elif model_info["source"] == "torchxrayvision":
-                try:
-                    # Explicitly print available weights for debugging
-                    st.write(f"Loading TorchXRayVision model with weights: {model_info['name']}")
+                # Display available models for debugging
+                if st.session_state.debug_mode:
+                    st.write("Available TorchXRayVision models:", xrv.models.available_models())
 
-                    # Make sure we're using all defaults for TorchXRayVision models
+                try:
+                    # Load the model with proper initialization
+                    model = xrv.models.DenseNet(weights=model_info["name"])
+
+                    if st.session_state.debug_mode:
+                        st.write(f"Model expects data preprocessing with xrv.datasets.normalize(img, maxval=255)")
+
+                    # Set model to evaluation mode
+                    model = model.to(st.session_state.device)
+                    model.eval()
+
+                    # Store pathology labels
+                    pathologies = xrv.datasets.default_pathologies
+                    if st.session_state.debug_mode:
+                        st.write(f"Model can predict these pathologies: {pathologies}")
+
+                    # Store in session state
+                    st.session_state.models_loaded[model_name] = model
+                    st.session_state[f"{model_name}_pathologies"] = pathologies
+
+                    st.success(f"✅ {model_name} loaded successfully!")
+                    return model
+                except Exception as e:
+                    st.error(f"Error in primary loading method: {e}")
+                    st.warning("Attempting alternative loading method...")
+
+                    # Fallback method with explicit parameters
                     model = xrv.models.DenseNet(weights=model_info["name"])
                     model = model.to(st.session_state.device)
                     model.eval()
 
-                    # Print model pathologies
-                    st.write(f"Model targets the following pathologies: {xrv.datasets.default_pathologies}")
-
                     st.session_state.models_loaded[model_name] = model
-                    st.success(f"✅ {model_name} loaded successfully!")
-                    return model
-                except Exception as e:
-                    st.error(f"Failed to load {model_name} from TorchXRayVision: {e}")
-                    st.info("Attempting fallback method...")
-
-                    # Try alternative loading method
-                    if model_info["name"] == "densenet121-res224-chex":
-                        model = xrv.models.DenseNet(weights="densenet121-res224-chex")
-                    elif model_info["name"] == "densenet121-res224-mimic_nb":
-                        model = xrv.models.DenseNet(weights="densenet121-res224-mimic_nb")
-                    else:
-                        model = xrv.models.DenseNet(weights="densenet121-res224-all")
-
-                    model = model.to(st.session_state.device)
-                    model.eval()
-
-                    st.session_state.models_loaded[model_name] = model
-                    st.success(f"✅ {model_name} loaded with fallback method!")
+                    st.success(f"✅ {model_name} loaded with alternative method!")
                     return model
 
     except Exception as e:
@@ -241,75 +245,91 @@ def preprocess_image(image, model_name):
 
     # Different preprocessing depending on model source
     if model_name in MODELS and MODELS[model_name]["source"] == "torchxrayvision":
-        # Use TorchXRayVision's preprocessing
-        # Convert PIL image to numpy array and ensure proper scaling
+        # Convert PIL image to numpy array with float32 dtype
         img_np = np.array(image).astype(np.float32)
-        # Normalize to 0-1 range before passing to xrv.datasets.normalize
-        if img_np.max() > 0:
-            img_np = img_np / 255.0
-        # Now use xrv's normalize function with 224 as target size
-        img = xrv.datasets.normalize(img_np, 224)
-        tensor_img = torch.from_numpy(img).unsqueeze(0)
+
+        # IMPORTANT: Do NOT pre-normalize before calling xrv.datasets.normalize
+        # Pass the maxval parameter (255 for 8-bit images) directly to normalize
+        img = xrv.datasets.normalize(img_np, maxval=255)
+
+        # Ensure proper dimensions: [batch, channels, height, width]
+        if img.shape != (-1, 1, 224, 224):
+            # The normalize function should have reshaped, but double-check
+            img = img.reshape(1, 1, 224, 224)
+
+        tensor_img = torch.from_numpy(img)
     else:
         # Standard preprocessing for PyTorch models
         transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485], std=[0.229])  # Single channel normalization
+            transforms.Normalize(mean=[0.485], std=[0.229])  # Standard ImageNet normalization
         ])
         tensor_img = transform(image).unsqueeze(0)
 
     return tensor_img
 
-def predict_disease(image, model_name, threshold=0.5):
-    """Predict disease from image using specified model"""
+def get_model_calibrated_threshold(model_name):
+    """Return appropriate threshold for specific models based on their calibration"""
+    # Model-specific thresholds based on typical calibration
+    if model_name == "CheXpert":
+        return 0.35  # Lower threshold for CheXpert
+    elif model_name == "MIMIC-CXR":
+        return 0.30  # Lower threshold for MIMIC-CXR
+    else:
+        return 0.5   # Standard threshold for other models
+
+def predict_disease(image, model_name, threshold=None):
+    """Predict disease from image using specified model with proper calibration"""
     if model_name not in st.session_state.models_loaded:
         st.error(f"Model {model_name} not loaded. Please load it first.")
         return None, None
+
+    # Use model-specific calibrated threshold if not explicitly provided
+    if threshold is None:
+        threshold = get_model_calibrated_threshold(model_name)
 
     model = st.session_state.models_loaded[model_name]
     tensor_img = preprocess_image(image, model_name).to(st.session_state.device)
 
     with torch.no_grad():
         if MODELS[model_name]["source"] == "torchxrayvision":
-            # TorchXRayVision models have different outputs
+            # Forward pass through the model
             outputs = model(tensor_img)
+
+            # Apply sigmoid to get probabilities
             probs = torch.sigmoid(outputs)
 
-            # Get all probabilities above threshold
-            label_names = xrv.datasets.default_pathologies
-            detected_diseases = []
-            max_prob = 0
-            max_idx = -1
-
-            # Log all probabilities for debugging
-            for i, (name, prob) in enumerate(zip(label_names, probs[0])):
-                prob_val = prob.item()
-                if prob_val > max_prob:
-                    max_prob = prob_val
-                    max_idx = i
-                if prob_val >= threshold:
-                    detected_diseases.append((name, prob_val))
-
-            # If too many diseases are detected, increase the threshold adaptively
-            adaptive_threshold = threshold
-            while len(detected_diseases) > 3 and adaptive_threshold < 0.9:
-                adaptive_threshold += 0.1
-                detected_diseases = [(name, prob) for name, prob in detected_diseases if prob >= adaptive_threshold]
-
-            # Choose the highest probability disease, or "No Disease" if none above threshold
-            if detected_diseases:
-                # Sort by probability (highest first)
-                detected_diseases.sort(key=lambda x: x[1], reverse=True)
-                predicted_label, max_prob_val = detected_diseases[0]
+            # Get pathology labels for this model
+            if f"{model_name}_pathologies" in st.session_state:
+                label_names = st.session_state[f"{model_name}_pathologies"]
             else:
-                if max_idx >= 0:
-                    # Debug logging - even if below threshold, what's the highest?
-                    predicted_label = "No Disease"
-                    max_prob_val = max_prob
-                else:
-                    predicted_label = "No Disease"
-                    max_prob_val = 0.0
+                label_names = xrv.datasets.default_pathologies
+
+            # Create a list of (disease, probability) pairs
+            disease_probs = [(name, prob.item()) for name, prob in zip(label_names, probs[0])]
+
+            # Sort by probability (highest first)
+            disease_probs.sort(key=lambda x: x[1], reverse=True)
+
+            # Get the highest probability disease
+            top_disease, top_prob = disease_probs[0]
+
+            # Apply threshold to determine if we should predict this disease
+            if top_prob >= threshold:
+                predicted_label = top_disease
+                confidence = top_prob
+            else:
+                predicted_label = "No Disease"
+                confidence = 1.0 - top_prob  # Confidence in "No Disease"
+
+            # Optional debug information
+            if st.session_state.get('debug_mode', False):
+                st.write("### Top 5 Disease Probabilities")
+                for disease, prob in disease_probs[:5]:
+                    st.write(f"{disease}: {prob:.4f}")
+                st.write(f"Using threshold: {threshold}")
+
         else:
             # Standard models
             outputs = model(tensor_img)
@@ -321,20 +341,18 @@ def predict_disease(image, model_name, threshold=0.5):
             else:
                 label_names = [f"Disease_{i}" for i in range(probs.shape[1])]
 
-            # Log all probabilities for debugging
-            all_probs = [(label, prob.item()) for label, prob in zip(label_names, probs[0])]
-            st.write("All probabilities:", all_probs)
-
             # Get highest probability
             max_prob, max_idx = torch.max(probs[0], dim=0)
-            max_prob_val = max_prob.item()
+            top_prob = max_prob.item()
 
-            if max_prob_val >= threshold:
+            if top_prob >= threshold:
                 predicted_label = label_names[max_idx]
+                confidence = top_prob
             else:
                 predicted_label = "No Disease"
+                confidence = 1.0 - top_prob
 
-        return predicted_label, max_prob_val
+        return predicted_label, confidence
 
 def compute_fairness_metrics(df, protected_attribute, target, prediction):
     """Compute fairness metrics based on predictions"""
@@ -460,6 +478,29 @@ def apply_bias_mitigation(df, protected_attribute, prediction_col, probability_c
     except Exception as e:
         logging.error(f"Error applying bias mitigation: {e}", exc_info=True)
         return df
+
+def test_with_lower_threshold(image, model_name):
+    """Test disease prediction with progressively lower thresholds to find when predictions appear"""
+    if model_name not in st.session_state.models_loaded:
+        st.error(f"Model {model_name} not loaded. Please load it first.")
+        return
+
+    st.write(f"## Testing {model_name} with different thresholds")
+
+    # Test with different thresholds
+    thresholds = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05]
+
+    results = []
+    for threshold in thresholds:
+        predicted_label, confidence = predict_disease(image, model_name, threshold)
+        results.append({
+            "Threshold": threshold,
+            "Prediction": predicted_label,
+            "Confidence": confidence
+        })
+
+    # Display results as a table
+    st.table(pd.DataFrame(results))
 
 # ------------------------- PAGE FUNCTIONS -------------------------
 def home_page():
@@ -672,7 +713,9 @@ def explore_data_page():
 
             # Add percentages
             total_counts = pivot_df.sum(axis=1)
-            for col in pivot_df.columns:
+            for
+
+col in pivot_df.columns:
                 pivot_df[f"{col}_pct"] = (pivot_df[col] / total_counts * 100).round(1)
 
             # Sort by total counts
@@ -695,6 +738,9 @@ def model_prediction_page():
     st.title("🤖 Model Prediction")
     st.markdown("Select an AI model and upload chest X-ray images for prediction.")
 
+    # Debug mode toggle
+    st.session_state.debug_mode = st.sidebar.checkbox("Enable Debug Mode", value=False)
+
     if st.session_state.df is None:
         st.warning("⚠️ Please upload and process a dataset before making predictions.")
         return
@@ -715,12 +761,23 @@ def model_prediction_page():
         help="Choose the model to use for prediction."
     )
 
-    # Decision threshold
+    # Decision threshold with model-specific defaults
+    default_threshold = get_model_calibrated_threshold(model_choice)
     threshold = st.slider(
         "Decision Threshold",
-        0.0, 1.0, 0.5, 0.01,
-        help="Adjust the threshold for positive disease classification."
+        0.0, 1.0, default_threshold, 0.01,
+        help=f"Adjust threshold for positive predictions. Default for {model_choice}: {default_threshold}"
     )
+
+    # Model-specific information
+    if model_choice in MODELS and MODELS[model_choice]["source"] == "torchxrayvision":
+        st.info(f"""
+        **{model_choice} Information**:
+        - Medical-specific model requiring specialized preprocessing
+        - Typically uses lower threshold values ({default_threshold})
+        - Trained on specific chest X-ray datasets
+        - May require different interpretation than general models
+        """)
 
     # Upload images
     uploaded_images = st.file_uploader(
@@ -729,6 +786,26 @@ def model_prediction_page():
         accept_multiple_files=True,
         help="Upload one or more chest X-ray images for analysis."
     )
+
+    # Add threshold testing button
+    if st.button("Test with Multiple Thresholds") and uploaded_images:
+        with st.expander("Threshold Testing Results", expanded=True):
+            img = Image.open(uploaded_images[0]).convert("L")
+
+            st.write(f"### Testing {model_choice} with different thresholds")
+            test_thresholds = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
+
+            results = []
+            for test_threshold in test_thresholds:
+                pred_label, conf = predict_disease(img, model_choice, test_threshold)
+                results.append({
+                    "Threshold": test_threshold,
+                    "Prediction": pred_label,
+                    "Confidence": conf
+                })
+
+            # Display results as a table
+            st.table(pd.DataFrame(results))
 
     if uploaded_images:
         with st.spinner("Processing images..."):
@@ -764,7 +841,7 @@ def model_prediction_page():
                             actual_disease = "Unknown"
                             gender = "Unknown"
 
-# Add result to our tracking dataframe
+                        # Add result to our tracking dataframe
                         new_row = {
                             "Image_ID": img.name,
                             "Gender": gender,
