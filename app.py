@@ -200,6 +200,16 @@ def preprocess_image(image, model_name):
     if image.mode != 'L':  # If not already grayscale
         image = image.convert('L')
 
+    # Make sure image is square by center cropping
+    width, height = image.size
+    if width != height:
+        new_size = min(width, height)
+        left = (width - new_size) // 2
+        top = (height - new_size) // 2
+        right = left + new_size
+        bottom = top + new_size
+        image = image.crop((left, top, right, bottom))
+
     # Different preprocessing depending on model source
     if model_name in MODELS and MODELS[model_name]["source"] == "torchxrayvision":
         # Use TorchXRayVision's preprocessing
