@@ -10,7 +10,7 @@ plotly==6.0.0
 fairlearn==0.10.0
 shap==0.44.0
 scipy==1.10.1
-transformers==4.49.0
+transformers==4.40.0
 lime==0.2.0.1
 fpdf==1.7.2
 opencv-python-headless==4.9.0.80
