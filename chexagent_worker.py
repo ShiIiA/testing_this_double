@@ -13,36 +13,40 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: python chexagent_worker.py <image_path> <prompt>")
+    try:
+        if len(sys.argv) < 3:
+            print("Usage: python chexagent_worker.py <image_path> <prompt>", file=sys.stderr)
+            sys.exit(1)
+        image_path = sys.argv[1]
+        prompt = sys.argv[2]
+        dtype = torch.bfloat16
+        device = "cpu"
+        model_name = "StanfordAIMI/CheXagent-2-3b"
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cpu", trust_remote_code=True)
+        model = model.to(dtype)
+        model.eval()
+        # Prepare query using the expected format.
+        query = tokenizer.from_list_format([{'image': image_path}, {'text': prompt}])
+        conv = [
+            {"from": "system", "value": "You are a helpful assistant."},
+            {"from": "human", "value": query}
+        ]
+        input_ids = tokenizer.apply_chat_template(conv, add_generation_prompt=True, return_tensors="pt")
+        output = model.generate(
+            input_ids.to(device),
+            do_sample=False,
+            num_beams=1,
+            temperature=1.0,
+            top_p=1.0,
+            use_cache=True,
+            max_new_tokens=128
+        )[0]
+        response = tokenizer.decode(output[input_ids.size(1):-1])
+        print(response)
+    except Exception as ex:
+        print("Error in chexagent_worker.py: " + str(ex), file=sys.stderr)
         sys.exit(1)
-    image_path = sys.argv[1]
-    prompt = sys.argv[2]
-    dtype = torch.bfloat16
-    device = "cpu"
-    model_name = "StanfordAIMI/CheXagent-2-3b"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cpu", trust_remote_code=True)
-    model = model.to(dtype)
-    model.eval()
-    # Prepare query using the expected format.
-    query = tokenizer.from_list_format([{'image': image_path}, {'text': prompt}])
-    conv = [
-         {"from": "system", "value": "You are a helpful assistant."},
-         {"from": "human", "value": query}
-    ]
-    input_ids = tokenizer.apply_chat_template(conv, add_generation_prompt=True, return_tensors="pt")
-    output = model.generate(
-         input_ids.to(device),
-         do_sample=False,
-         num_beams=1,
-         temperature=1.0,
-         top_p=1.0,
-         use_cache=True,
-         max_new_tokens=128
-    )[0]
-    response = tokenizer.decode(output[input_ids.size(1):-1])
-    print(response)
 
 if __name__ == "__main__":
     main()

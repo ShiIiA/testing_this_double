@@ -86,6 +86,8 @@ if "df" not in st.session_state:
     st.session_state.df = None
 if "df_results" not in st.session_state:
     st.session_state.df_results = pd.DataFrame(columns=["Image_ID", "Gender", "Prediction", "Probability"])
+if "chexagent_loaded" not in st.session_state:
+    st.session_state.chexagent_loaded = False
 
 # ------------------------- MODEL & HELPER FUNCTIONS -------------------------
 @st.cache_resource(show_spinner=True)
@@ -110,17 +112,18 @@ def chexagent_inference(image, prompt="Analyze the chest X‑ray image and retur
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             image.save(tmp.name)
             tmp_path = tmp.name
-        # Call the separate worker script and pass the image path and prompt.
-        # (Ensure chexagent_worker.py is in the same directory as this app.)
+        # Call the separate worker script
         result = subprocess.run(
             ["python", "chexagent_worker.py", tmp_path, prompt],
-            capture_output=True, text=True, check=True
+            capture_output=True, text=True
         )
         os.remove(tmp_path)
+        if result.returncode != 0:
+            st.error("CheXagent Worker Error: " + result.stderr)
+            raise Exception("Worker failed with error: " + result.stderr)
         return result.stdout.strip()
     except Exception as ex:
         logging.error("CheXagent inference error", exc_info=True)
-        os.remove(tmp_path)
         raise ex
 
 def unify_gender_label(label):
