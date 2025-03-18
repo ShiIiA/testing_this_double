@@ -10,11 +10,9 @@ Original file is located at
 import os
 import io
 import logging
-import tempfile
 import warnings
 import streamlit as st
 import pandas as pd
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,9 +23,9 @@ from PIL import Image
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
-# Streamlit Page Configuration
+# ------------------------- PAGE CONFIGURATION -------------------------
 st.set_page_config(
-    page_title="Dynamic Disease Prediction",
+    page_title="Dynamic Medical AI",
     page_icon="🔬",
     layout="wide"
 )
@@ -35,6 +33,10 @@ st.set_page_config(
 # ------------------------- GLOBAL SESSION STATE -------------------------
 if "df" not in st.session_state:
     st.session_state.df = None
+if "disease_col" not in st.session_state:
+    st.session_state.disease_col = None
+if "gender_col" not in st.session_state:
+    st.session_state.gender_col = None
 if "disease_classes" not in st.session_state:
     st.session_state.disease_classes = []
 if "model_loaded" not in st.session_state:
@@ -53,14 +55,18 @@ if uploaded_file:
         st.write("**Preview of Uploaded Data:**")
         st.dataframe(df.head())
 
-        # Extract disease columns dynamically (assuming disease columns are binary: 1 for present, 0 for absent)
-        disease_cols = [col for col in df.columns if df[col].nunique() == 2 and sorted(df[col].unique()) == [0, 1]]
-        st.session_state.disease_classes = disease_cols
+        # Allow user to select gender and disease columns
+        st.session_state.gender_col = st.selectbox("Select Gender Column", df.columns.tolist())
+        st.session_state.disease_col = st.selectbox("Select Disease Column", df.columns.tolist())
 
-        if not disease_cols:
-            st.warning("No binary disease labels detected in the dataset.")
+        # Extract unique disease values dynamically
+        disease_classes = df[st.session_state.disease_col].dropna().unique().tolist()
+        st.session_state.disease_classes = sorted(disease_classes)
+
+        if not disease_classes:
+            st.warning("⚠️ No diseases detected in the selected column.")
         else:
-            st.success(f"✅ Detected {len(disease_cols)} diseases: {', '.join(disease_cols)}")
+            st.success(f"✅ Detected {len(disease_classes)} diseases: {', '.join(disease_classes)}")
 
     except Exception as e:
         logging.error("Error loading file", exc_info=True)
@@ -130,7 +136,7 @@ if st.session_state.df is not None:
     st.title("📊 Explore Data & Visualizations")
 
     # Disease Frequency Visualization
-    disease_counts = st.session_state.df[st.session_state.disease_classes].sum().sort_values(ascending=False)
+    disease_counts = st.session_state.df[st.session_state.disease_col].value_counts()
     st.bar_chart(disease_counts)
 
     # Display missing values
@@ -140,19 +146,19 @@ if st.session_state.df is not None:
 # ------------------------- BIAS DETECTION -------------------------
 st.title("⚖️ Gender Bias Analysis")
 if st.session_state.df is not None:
-    gender_col = st.selectbox("Select Gender Column", st.session_state.df.columns.tolist())
-    disease_col = st.selectbox("Select Disease Column for Bias Analysis", st.session_state.disease_classes)
+    gender_col = st.session_state.gender_col
+    disease_col = st.session_state.disease_col
 
     if gender_col and disease_col:
         # Compute Bias Metrics
         df_filtered = st.session_state.df[[gender_col, disease_col]].dropna()
-        bias_summary = df_filtered.groupby(gender_col)[disease_col].mean().reset_index()
+        bias_summary = df_filtered.groupby(gender_col)[disease_col].value_counts(normalize=True).reset_index(name="Proportion")
         st.write("### Bias Analysis Results")
         st.dataframe(bias_summary)
 
         # Visualizing Gender Bias
         import plotly.express as px
-        bias_chart = px.bar(bias_summary, x=gender_col, y=disease_col, title="Gender Bias in Disease Predictions", color=gender_col)
+        bias_chart = px.bar(bias_summary, x=gender_col, y="Proportion", color=disease_col, title="Gender Bias in Disease Predictions")
         st.plotly_chart(bias_chart)
 
 # ------------------------- END OF APP -------------------------
