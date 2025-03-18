@@ -203,7 +203,13 @@ def preprocess_image(image, model_name):
     # Different preprocessing depending on model source
     if model_name in MODELS and MODELS[model_name]["source"] == "torchxrayvision":
         # Use TorchXRayVision's preprocessing
-        img = xrv.datasets.normalize(np.array(image), 224)
+        # Convert PIL image to numpy array and ensure proper scaling
+        img_np = np.array(image).astype(np.float32)
+        # Normalize to 0-1 range before passing to xrv.datasets.normalize
+        if img_np.max() > 0:
+            img_np = img_np / 255.0
+        # Now use xrv's normalize function with 224 as target size
+        img = xrv.datasets.normalize(img_np, 224)
         tensor_img = torch.from_numpy(img).unsqueeze(0)
     else:
         # Standard preprocessing for PyTorch models
@@ -683,7 +689,7 @@ def model_prediction_page():
                             actual_disease = "Unknown"
                             gender = "Unknown"
 
-                        # Add result to our tracking dataframe
+# Add result to our tracking dataframe
                         new_row = {
                             "Image_ID": img.name,
                             "Gender": gender,
@@ -1363,7 +1369,7 @@ def bias_mitigation_simulation_page():
 
     # Display the mitigated predictions
     st.markdown("### Mitigated Predictions")
-    st.dataframe(df_results_clean[["Image_ID", "Gender", "Prediction", "Probability", "Mitigated_Prediction"]])
+    st.dataframe(df_results_clean[["Image_ID", ""Gender", "Prediction", "Probability", "Mitigated_Prediction"]])
 
     # Save button for mitigated predictions
     if st.button("Save Mitigated Predictions"):
