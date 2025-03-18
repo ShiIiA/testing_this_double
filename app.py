@@ -8,7 +8,9 @@ Original file is located at
 """
 
 import os
+import io
 import logging
+import tempfile
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -24,7 +26,6 @@ from PIL import Image
 from fairlearn.metrics import demographic_parity_difference, equalized_odds_difference
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score
 from torchvision.models import DenseNet121_Weights
-from transformers import pipeline  # (Not used anymore for CheXagent)
 import re
 from collections import Counter
 
@@ -93,6 +94,49 @@ try:
 except Exception as e:
     logging.error("Error loading CheXNet model", exc_info=True)
     st.error(f"🚨 Error loading CheXNet model: {e}")
+
+@st.cache_resource(show_spinner=True)
+def load_chexagent_model():
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    model_name = "StanfordAIMI/CheXagent-2-3b"
+    dtype = torch.bfloat16
+    device_agent = "cuda" if torch.cuda.is_available() else "cpu"
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", trust_remote_code=True)
+    model = model.to(dtype)
+    model.eval()
+    return model, tokenizer, device_agent
+
+# We load CheXagent on demand; if user selects it, we call load_chexagent_model()
+
+def chexagent_inference(image, prompt="Analyze the chest X‑ray image and return what you see along with the disease name detected."):
+    # Save image temporarily
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        image.save(tmp.name)
+        tmp_path = tmp.name
+    # Build a query list containing a dictionary with the image path and a text prompt.
+    # (The input format follows the CheXagent instructions.)
+    # Note: CheXagent expects a list of dictionaries.
+    from transformers import AutoTokenizer
+    model_agent, tokenizer, device_agent = load_chexagent_model()
+    query = tokenizer.from_list_format([{'image': tmp_path}, {'text': prompt}])
+    conv = [
+        {"from": "system", "value": "You are a helpful assistant."},
+        {"from": "human", "value": query}
+    ]
+    input_ids = tokenizer.apply_chat_template(conv, add_generation_prompt=True, return_tensors="pt")
+    output = model_agent.generate(
+        input_ids.to(device_agent),
+        do_sample=False,
+        num_beams=1,
+        temperature=1.0,
+        top_p=1.0,
+        use_cache=True,
+        max_new_tokens=512
+    )[0]
+    response = tokenizer.decode(output[input_ids.size(1):-1])
+    os.remove(tmp_path)
+    return response
 
 def unify_gender_label(label):
     text = str(label).strip().lower()
@@ -286,9 +330,9 @@ def explore_data_page():
 def model_prediction_page():
     st.title("🤖 Model Prediction")
     st.markdown("Select an AI model and upload chest X‑ray images for prediction.")
-    # Use only CheXNet; fixed threshold of 0.5
-    st.markdown("Using CheXNet with fixed threshold 0.5")
+    model_choice = st.selectbox("Select AI Model:", ["CheXNet", "CheXagent"], help="Choose the model to use for prediction.")
     uploaded_images = st.file_uploader("Upload X‑ray Images", type=["png", "jpg", "jpeg"], accept_multiple_files=True, help="Upload one or more images.")
+    # For CheXNet, we use a fixed threshold of 0.5.
     fixed_threshold = 0.5
     if uploaded_images:
         with st.spinner("Processing images..."):
@@ -299,16 +343,25 @@ def model_prediction_page():
                 st.image(img, caption=f"Uploaded: {img.name}", width=300)
                 try:
                     image = Image.open(img).convert("RGB")
-                    tensor_img = preprocess_image(image)
-                    tensor_img = tensor_img.to(device)
-                    with torch.no_grad():
-                        logits = chexnet_model(tensor_img)
-                        probs = F.softmax(logits, dim=1)
-                        disease_prob = probs[0, 1].item()
-                        predicted_label = 1 if disease_prob >= fixed_threshold else 0
-                    new_row = {"Image_ID": img.name, "Gender": "Unknown", "Prediction": predicted_label, "Probability": disease_prob}
-                    st.session_state.df_results = pd.concat([st.session_state.df_results, pd.DataFrame([new_row])], ignore_index=True)
-                    st.success(f"Prediction: {'Disease Detected' if predicted_label == 1 else 'No Disease'} | Prob: {disease_prob:.2%}")
+                    if model_choice == "CheXNet":
+                        tensor_img = preprocess_image(image)
+                        tensor_img = tensor_img.to(device)
+                        with torch.no_grad():
+                            logits = chexnet_model(tensor_img)
+                            probs = F.softmax(logits, dim=1)
+                            disease_prob = probs[0, 1].item()
+                            predicted_label = 1 if disease_prob >= fixed_threshold else 0
+                        new_row = {"Image_ID": img.name, "Gender": "Unknown", "Prediction": predicted_label, "Probability": disease_prob}
+                        st.session_state.df_results = pd.concat([st.session_state.df_results, pd.DataFrame([new_row])], ignore_index=True)
+                        st.success(f"CheXNet Prediction: {'Disease Detected' if predicted_label == 1 else 'No Disease'} | Prob: {disease_prob:.2%}")
+                    elif model_choice == "CheXagent":
+                        # Use CheXagent to generate a text response.
+                        prompt = "Analyze the chest X‑ray image and return what you see along with the disease name detected."
+                        response = chexagent_inference(image, prompt=prompt)
+                        # For CheXagent, we treat the response as a text prediction.
+                        new_row = {"Image_ID": img.name, "Gender": "Unknown", "Prediction": response, "Probability": None}
+                        st.session_state.df_results = pd.concat([st.session_state.df_results, pd.DataFrame([new_row])], ignore_index=True)
+                        st.success(f"CheXagent Response: {response}")
                 except Exception as e:
                     logging.error("Error during prediction", exc_info=True)
                     st.error(f"Error making prediction: {e}")
@@ -404,7 +457,7 @@ def gender_bias_testing_page():
     if df_results.empty:
         st.info("No prediction data available. Generate predictions first.")
     else:
-        # Fixed threshold of 0.5 for all predictions
+        # Fixed threshold is used, so no adjustment is needed.
         fixed_threshold = 0.5
         df_new = df_results.copy()
         df_new["Adjusted_Prediction"] = df_new["Prediction"].apply(lambda x: 1 if x >= fixed_threshold else 0)
@@ -516,7 +569,7 @@ def about_chexagent_page():
         """
         **CheXagent** is a chest X‑ray analysis model provided by Stanford AIMI on Hugging Face.
 
-        - Model: StanfordAIMI/CheXagent-2-3b (Not used in this version)
+        - Model: StanfordAIMI/CheXagent-2-3b (Integration for image analysis and disease detection)
         """
     )
 
@@ -613,22 +666,27 @@ def feedback_page():
 
 def interactive_demos_page():
     st.title("🔍 Interactive Demonstrations")
-    st.markdown("Compare predictions from CheXNet side by side.")
+    st.markdown("Compare predictions from CheXNet and CheXagent side by side.")
     uploaded_image = st.file_uploader("Upload a single X‑ray image", type=["png", "jpg", "jpeg"])
-    threshold = 0.5  # Fixed threshold
     if uploaded_image:
         image = Image.open(uploaded_image).convert("RGB")
         st.image(image, caption="Uploaded X‑ray", width=300)
+        # CheXNet prediction
         tensor_img = preprocess_image(image)
         tensor_img_chexnet = tensor_img.to(device)
         with torch.no_grad():
             logits = chexnet_model(tensor_img_chexnet)
             probs = F.softmax(logits, dim=1)
             chexnet_prob = probs[0, 1].item()
-            chexnet_pred = 1 if chexnet_prob >= threshold else 0
+            chexnet_pred = 1 if chexnet_prob >= 0.5 else 0
+        # CheXagent prediction using our inference function.
+        prompt = "Analyze the chest X‑ray image and return what you see along with the disease name detected."
+        chexagent_response = chexagent_inference(image, prompt=prompt)
         st.markdown("### CheXNet Prediction")
         st.write(f"Prediction: {'Disease' if chexnet_pred == 1 else 'No Disease'}")
         st.write(f"Probability: {chexnet_prob:.2%}")
+        st.markdown("### CheXagent Response")
+        st.write(chexagent_response)
     else:
         st.info("Upload an image for comparison.")
 
